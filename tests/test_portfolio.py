@@ -144,3 +144,18 @@ def test_unconfigured_destination(portfolio):
     portfolio.repository.save_settings(replace(portfolio.repository.load_settings(),selling_realms=()))
     with pytest.raises(ValueError,match='configured'):
         portfolio.select(('us',1,1),'stronger-demand','agamaggan','s')
+
+def test_successive_corrections_and_restore_after_void(portfolio):
+ p=portfolio
+ purchase=buy(p)
+ sale=p.record({'type':'sale','purchase_id':purchase['id'],'quantity':1,'net_proceeds':500000},'sale')
+ p.record({'type':'correction','target_id':sale['id'],'replacement':{'net_proceeds':600000}},'first')
+ p.record({'type':'correction','target_id':sale['id'],'replacement':{'quantity':2}},'second')
+ assert p.summary()['cash']==299599999
+ assert p.summary()['inventory'][0]['remaining_quantity']==1
+ p.record({'type':'correction','target_id':sale['id'],'replacement':None},'void')
+ assert p.summary()['inventory'][0]['remaining_quantity']==3
+ p.record({'type':'correction','target_id':sale['id'],'replacement':{'net_proceeds':700000}},'restore')
+ assert p.summary()['cash']==299699999
+ assert p.summary()['inventory'][0]['remaining_quantity']==2
+ assert len(p.history())==6

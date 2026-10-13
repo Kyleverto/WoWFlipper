@@ -1,0 +1,25 @@
+name: Tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install '.[test]'
+      - run: python -m pytest -q
+      - run: python -m pip wheel --no-deps . --wheel-dir /tmp/wowflipper-wheels
+      - name: Verify installed CLI and UI resources outside checkout
+        run: |
+          python -m venv /tmp/wowflipper-installed
+          /tmp/wowflipper-installed/bin/python -m pip install /tmp/wowflipper-wheels/*.whl
+          cd /tmp
+          /tmp/wowflipper-installed/bin/wowflipper --help
+          /tmp/wowflipper-installed/bin/python -c 'from tempfile import TemporaryDirectory; from wowflipper.web import create_app; d=TemporaryDirectory(); a=create_app(d.name); c=a.test_client(); assert c.get("/").status_code == 200; assert c.get("/static/app.js").status_code == 200; assert c.get("/static/style.css").status_code == 200'

@@ -62,3 +62,8 @@ def test_variant_identity_is_conservative():
  assert evaluate(replace(A,variant_key='{"context":0,"bonus_lists":[],"modifiers":[]}'),V,S,NOW)
  assert evaluate(replace(A,variant_key='{"bonus_lists":[123]}'),V,S,NOW) is None
  assert evaluate(replace(A,variant_key='{"pet_species_id":5}'),V,S,NOW) is None
+
+def test_stale_valuation_excludes_actionable_candidate():
+ stale=replace(V,updated_at=NOW-timedelta(hours=S.max_tsm_age_hours+1))
+ assert evaluate(A,stale,S,NOW) is None
+ assert 'valuation' in exclusion_reason(A,stale,S,NOW)
