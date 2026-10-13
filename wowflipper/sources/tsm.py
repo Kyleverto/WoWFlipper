@@ -58,14 +58,14 @@ class TSMClient:
         from datetime import datetime, timezone
         from dataclasses import replace
         from ..models import Snapshot
-        from .http import SourceError
+        from .http import http_status_error
         headers={'If-Modified-Since':previous.http_last_modified} if previous and previous.http_last_modified else {}
         response=self.http.request('GET',self.URL,headers)
         now=datetime.now(timezone.utc)
         if response.status==304:
             if previous is None: raise ValueError('304 without prior TSM snapshot')
             return replace(previous,fetched_at=now)
-        if response.status!=200: raise SourceError(f'TSM request failed ({response.status})')
+        if response.status!=200: raise http_status_error(response.status)
         try: report=parse_region_report(response.body.decode('utf-8-sig'))
         except UnicodeError: raise ValueError('Invalid TSM text encoding') from None
         if not report.records: raise ValueError('Invalid TSM regional rows')

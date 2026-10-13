@@ -1,4 +1,5 @@
 """Loopback-only browser adapter. Never exposes upstream exception bodies."""
+from .realms import selectable_us_realm
 import csv, io, os, secrets, json
 from decimal import Decimal
 from pathlib import Path
@@ -69,7 +70,7 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
         data=body(repo.load_settings().to_dict())
         old=repo.load_settings(); updated=Settings.from_dict({**old.to_dict(),**data})
         if portfolio().history() and updated.capital!=old.capital: raise ValueError('Initial capital is frozen after ledger activity. Record a balance adjustment instead.')
-        selectable={r['slug'] for r in repo.cache_get('realms') or [] if r.get('category')=='United States'}
+        selectable={r['slug'] for r in repo.cache_get('realms') or [] if selectable_us_realm(r)}
         for field in ('buying_realms','selling_realms'):
             added=set(getattr(updated,field))-set(getattr(old,field))
             if added-selectable: raise ValueError('Select realms from the discovered US list')

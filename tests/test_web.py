@@ -26,7 +26,7 @@ def test_settings_validation_and_secrets(client,monkeypatch):
     assert 'never-print-this' not in client.get('/api/state').text
     assert post(client,'/api/settings',{'capital':1}).status_code==400
     assert post(client,'/api/settings',{'unknown':2}).status_code==400
-    client.application.extensions['repository'].cache_put('realms',[{'slug':'agamaggan','house_id':1,'category':'United States'}])
+    client.application.extensions['repository'].cache_put('realms',[{'slug':'agamaggan','house_id':1,'category':'United States','is_auction_realm':True}])
     assert post(client,'/api/settings',{'selling_realms':['agamaggan']}).status_code==200
 
 def test_demo_workflow_and_export(tmp_path):

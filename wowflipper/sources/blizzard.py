@@ -3,7 +3,8 @@ import os, json, base64, time
 from datetime import datetime, timezone
 from dataclasses import replace
 from email.utils import parsedate_to_datetime
-from .http import HTTPClient, SourceError
+from urllib.parse import urlsplit
+from .http import HTTPClient, SourceError, http_status_error
 from ..models import Snapshot, normalize_auction, integer
 
 class BlizzardClient:
@@ -14,10 +15,10 @@ class BlizzardClient:
         self.clock=clock; self._token=None; self._expires=0
 
     def _authenticate(self):
-        if not self.client_id or not self.client_secret: raise SourceError('Blizzard credentials are not configured')
+        if not self.client_id or not self.client_secret: raise SourceError('Blizzard credentials are not configured', code='auth_missing')
         basic=base64.b64encode(f'{self.client_id}:{self.client_secret}'.encode()).decode()
         response=self.http.request('POST','https://oauth.battle.net/token',{'Authorization':'Basic '+basic,'Content-Type':'application/x-www-form-urlencoded'},b'grant_type=client_credentials')
-        if response.status!=200: raise SourceError('Blizzard authentication failed')
+        if response.status!=200: raise http_status_error(response.status)
         data=self._json(response)
         if not isinstance(data.get('access_token'),str) or not isinstance(data.get('expires_in'),int) or data['expires_in']<=0: raise ValueError('Invalid token schema')
         self._token=data['access_token']; self._expires=self.clock()+data['expires_in']-min(30,data['expires_in']/10)
@@ -35,24 +36,46 @@ class BlizzardClient:
         for attempt in range(2):
             response=self.http.request('GET',url,{'Authorization':'Bearer '+self._token,**(headers or {})})
             if response.status==401 and attempt==0: self._authenticate(); continue
-            if response.status not in {200,304}: raise SourceError(f'Blizzard request failed ({response.status})')
+            if response.status not in {200,304}: raise http_status_error(response.status)
             return response
 
+    @staticmethod
+    def _connected_house(href):
+        if not isinstance(href,str): raise ValueError('Invalid connected realm link')
+        url=urlsplit(href)
+        prefix='/data/wow/connected-realm/'
+        value=url.path.removeprefix(prefix)
+        if url.scheme!='https' or url.hostname!='us.api.blizzard.com' or not url.path.startswith(prefix) or not value.isdigit():
+            raise ValueError('Invalid connected realm link')
+        return integer(int(value),1)
+
+    def connected_realm_ids(self):
+        # The broader realm index contains internal account/instance realms.
+        # Membership in the canonical connected-realm index establishes support
+        # for connected auction houses independently of realm names or status.
+        index=self._json(self._get('/data/wow/connected-realm/index'))
+        links=index.get('connected_realms')
+        if not isinstance(links,list) or not links: raise ValueError('Invalid connected realm index')
+        try: houses={self._connected_house(link['href']) for link in links}
+        except (KeyError,TypeError): raise ValueError('Invalid connected realm index') from None
+        return houses
+
     def realms(self):
+        houses=self.connected_realm_ids()
         data=self._json(self._get('/data/wow/realm/index'))
-        if not isinstance(data.get('realms'),list): raise ValueError('Invalid realms schema')
+        if not isinstance(data.get('realms'),list) or not data['realms']: raise ValueError('Invalid realms schema')
         result=[]
         for realm in data['realms']:
             detail=self._json(self._get('/data/wow/realm/'+realm['slug']))
-            href=detail.get('connected_realm',{}).get('href','')
-            try: house=int(href.split('?')[0].rstrip('/').split('/')[-1])
-            except ValueError: raise ValueError('Invalid connected realm') from None
+            href=detail.get('connected_realm',{}).get('href')
+            house=self._connected_house(href) if href else None
             # The us namespace includes Oceanic/Brazil/Latin America. Only the
             # official realm detail category establishes United States membership.
             result.append({**realm,'house_id':house,
                 'category':detail.get('category'), 'locale':detail.get('locale'),
                 'timezone':detail.get('timezone'),
                 'is_us':detail.get('category') == 'United States',
+                'is_auction_realm':house in houses,
                 'is_tournament':detail.get('is_tournament',False)})
         return result
 

@@ -174,7 +174,7 @@ def test_settings_preserve_existing_undiscovered_realms(tmp_path):
 
 def test_new_memberships_require_verified_us_realms(tmp_path):
     repo, _ = fixture_repo(tmp_path)
-    repo.cache_put('realms', [{'slug':'agamaggan','house_id':1,'category':'Oceania'}, {'slug':'verified-us','house_id':2,'category':'United States'}, {'slug':'unknown','house_id':3}])
+    repo.cache_put('realms', [{'slug':'agamaggan','house_id':1,'category':'Oceania'}, {'slug':'verified-us','house_id':2,'category':'United States','is_auction_realm':True}, {'slug':'unknown','house_id':3}])
     client = create_app(tmp_path, testing=True).test_client()
     csrf = client.get('/api/state').json['csrf']
     headers = {'X-CSRF-Token':csrf}

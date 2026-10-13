@@ -22,7 +22,7 @@ def test_refresh_shared_metadata_competition(tmp_path,buy_house,sell_house,cache
         def region(self,previous): return previous
     class Client:
         calls=[]
-        def realms(self): return [{'slug':'agamaggan','house_id':buy_house},{'slug':'away','house_id':sell_house}]
+        def realms(self): return [{'slug':'agamaggan','house_id':buy_house,'category':'United States','is_auction_realm':True},{'slug':'away','house_id':sell_house,'category':'United States','is_auction_realm':True}]
         def auctions(self,house,previous):
             price=7000000 if house==buy_house else 9000000
             return Snapshot(f'auctions:us:{house}',now,now,None,'fixture',tuple(Auction('us',house,i,7,1,price,None) for i in range(1,4)))
@@ -46,7 +46,7 @@ def test_refresh_resale_factor_precise_prefilter(tmp_path,price,expected):
         def region(self,previous): return previous
     class Client:
         calls=[]
-        def realms(self): return [{'slug':'agamaggan','house_id':1}]
+        def realms(self): return [{'slug':'agamaggan','house_id':1,'category':'United States','is_auction_realm':True}]
         def auctions(self,*args): return Snapshot('auctions:us:1',now,now,None,'fixture',(Auction('us',1,1,7,1,price,None),))
         def item(self,item): self.calls.append(item); return {'category':'recipe','tradeability':True}
     client=Client(); RefreshService(repo,client,TSM()).run(replace(Settings(),resale_factor=Decimal('1.2')))
@@ -104,7 +104,7 @@ def test_refresh_known_metadata_without_plausible_buy_and_bounded_requests(tmp_p
         def region(self,previous): return previous
     class Client:
         calls=[]
-        def realms(self): return [{'slug':'agamaggan','house_id':1}]
+        def realms(self): return [{'slug':'agamaggan','house_id':1,'category':'United States','is_auction_realm':True}]
         def auctions(self,*args):
             records=tuple(Auction('us',1,i,i,1,7000000,None) for i in range(1,105))
             # Cached classification applies even without valuation or a discounted ask.

@@ -48,7 +48,7 @@ def test_deduplicated_houses_partial_failure(tmp_path):
     old_id=repo.publish(old)
     class Client:
         calls=[]
-        def realms(self): return [{'slug':'agamaggan','house_id':1},{'slug':'other','house_id':1},{'slug':'third','house_id':2}]
+        def realms(self): return [{'slug':'agamaggan','house_id':1,'category':'United States','is_auction_realm':True},{'slug':'other','house_id':1,'category':'United States','is_auction_realm':True},{'slug':'third','house_id':2,'category':'United States','is_auction_realm':True}]
         def auctions(self,house,previous=None):
             self.calls.append(house)
             if house==2: raise ValueError('fixture')
@@ -73,7 +73,7 @@ def test_metadata_cache_and_simple_identity(tmp_path):
     repo.publish(Snapshot('tsm:us',now,now,None,'csv',(Valuation(2,'fixture',100,Decimal('.1'),Decimal('1'),100,100,now),)))
     class Client:
         items=[]
-        def realms(self): return [{'slug':'agamaggan','house_id':1}]
+        def realms(self): return [{'slug':'agamaggan','house_id':1,'category':'United States','is_auction_realm':True}]
         def auctions(self,*a): return Snapshot('auctions:us:1',now,now,None,'blizzard',(Auction('us',1,1,2,1,10,'{"context":0,"bonus_lists":[]}'),Auction('us',1,2,3,1,10,None)))
         def item(self,item): self.items.append(item); return {'category':'recipe','tradeability':True}
     client=Client()
@@ -110,7 +110,7 @@ def test_discovery_error_is_pollable(tmp_path):
     class TSM:
         def region(self,previous): raise ValueError('fixture')
     result=RefreshService(Repository(tmp_path),Client(),TSM()).run(Settings())
-    assert result['sources']['realms:us']=={'state':'failed','error':'ValueError'}
+    assert result['sources']['realms:us']=={'state':'failed','error':'ValueError','error_code':'invalid_schema'}
     assert result['running'] is False
 
 def test_toy_ids_map_through_details_and_cache(tmp_path):
@@ -134,7 +134,7 @@ def test_tsm_precedes_auctions_and_toy_classification(tmp_path):
             calls.append('tsm')
             return Snapshot('tsm:us',now,now,None,'tsm',(Valuation(123,'fixture',100,Decimal('.1'),Decimal('1'),100,100,now),))
     class Client:
-        def realms(self): calls.append('realms'); return [{'slug':'agamaggan','house_id':1}]
+        def realms(self): calls.append('realms'); return [{'slug':'agamaggan','house_id':1,'category':'United States','is_auction_realm':True}]
         def toy_items(self,repo): return {'items':[123],'pending':1}
         def auctions(self,*args):
             calls.append('auctions')

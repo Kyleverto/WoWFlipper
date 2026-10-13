@@ -13,7 +13,7 @@ from wowflipper.sources.http import HTTPClient, Response
 def test_realm_details_preserve_authoritative_category(slug,category,locale,timezone,is_us):
     detail={'slug':slug,'name':slug,'category':category,'locale':locale,'timezone':timezone,
             'connected_realm':{'href':'https://us.api.blizzard.com/data/wow/connected-realm/11?namespace=dynamic-us'}}
-    responses=[{'realms':[{'slug':slug,'name':slug}]},detail]
+    responses=[{'connected_realms':[{'href':'https://us.api.blizzard.com/data/wow/connected-realm/11?namespace=dynamic-us'}]}, {'realms':[{'slug':slug,'name':slug}]},detail]
     client=BlizzardClient(HTTPClient(lambda *a: Response(200,{},json.dumps(responses.pop(0)).encode())))
     client._token='fixture'; client._expires=10**20
     realm=client.realms()[0]
@@ -38,7 +38,7 @@ def test_fresh_legacy_realm_cache_is_rediscovered(tmp_path):
         calls=0
         def realms(self):
             self.calls+=1
-            return [{'slug':'agamaggan','house_id':1,'category':'United States'}]
+            return [{'slug':'agamaggan','house_id':1,'category':'United States','is_auction_realm':True}]
         def auctions(self,house,previous=None):
             return Snapshot('auctions:us:1',None,datetime.now(timezone.utc),None,'blizzard',())
     client=Client()
@@ -58,7 +58,7 @@ def test_selector_preserves_unknown_and_nonus_selections_and_bounds_bulk_actions
     script='''
 const assert=require('node:assert/strict');
 const {realmOptions, bulkBuy}=require('./wowflipper/static/realm-selection.js');
-const realms=[{slug:'us',name:'US',category:'United States'},
+const realms=[{slug:'us',name:'US',category:'United States',is_auction_realm:true},
  {slug:'oce',name:'Oceania',category:'Oceanic'},
  {slug:'unknown',name:'Unknown'}];
 const settings={buying_realms:['oce','missing'],selling_realms:['unknown']};
@@ -121,7 +121,7 @@ class Node {
  function visit(node){for(const child of node.children || []) {if(child.dataset?.membership && (!membership || child.dataset.membership===membership) && (!selector.includes(':checked') || child.checked)) result.push(child); visit(child);}} visit(this); return result;}
 }
 const elements=new Map();const $=id=>{if(!elements.has(id))elements.set(id,new Node());return elements.get(id)};
-const context={console,$,el:()=>new Node(),document:{createTextNode:text=>({text})},state:{realms:[{slug:'us',category:'United States'},{slug:'oce',category:'Oceanic'}],settings:{buying_realms:['oce'],selling_realms:[]}}};
+const context={console,$,el:()=>new Node(),document:{createTextNode:text=>({text})},state:{realms:[{slug:'us',category:'United States',is_auction_realm:true},{slug:'oce',category:'Oceanic'}],settings:{buying_realms:['oce'],selling_realms:[]}}};
 vm.createContext(context);
 vm.runInContext(fs.readFileSync('wowflipper/static/realm-selection.js','utf8'),context);
 const source=fs.readFileSync('wowflipper/static/app.js','utf8');
@@ -132,7 +132,7 @@ assert.equal(input('oce','buying').disabled,false);
 assert.equal(input('oce','selling').disabled,true);
 input('us','buying').checked=true; input('oce','buying').checked=false;
 $('realm-search').value='us';
-context.state.realms.push({slug:'new',category:'United States'});
+context.state.realms.push({slug:'new',category:'United States',is_auction_realm:true});
 vm.runInContext('renderRealmSelection(true)',context);
 assert.equal(input('us','buying').checked,true);
 assert.equal(input('oce','buying').checked,false);
@@ -148,7 +148,7 @@ context.renderCapital=context.renderSources=context.renderLedger=context.populat
 context.renderSettings=()=>{throw Error('must not reset the full settings form')};
 context.state.mode='live';context.state.refresh={running:false};
 vm.runInContext(source.slice(source.indexOf('async function loadState('),source.indexOf('function renderCapital(')),context);
-context.state.realms.push({slug:'updated',category:'United States'});
+context.state.realms.push({slug:'updated',category:'United States',is_auction_realm:true});
 vm.runInContext('loadState()',context).then(()=>{
 assert.ok(input('updated','buying'));assert.equal(input('us','buying').checked,true);assert.equal($('realm-search').value,'us');
 }).catch(error=>{console.error(error);process.exitCode=1});
@@ -182,3 +182,135 @@ assert.equal(node('export').attrs['aria-disabled'],'false');
 }).catch(error=>{console.error(error);process.exitCode=1});
 '''
     subprocess.run(['node','-e',script],check=True,cwd=Path(__file__).resolve().parents[1])
+
+
+def test_connected_realm_index_excludes_internal_realms_without_name_heuristics():
+    realms=[{'slug':'normal','name':'Normal'}, {'slug':'account','name':'US1A Account Realm'},
+            {'slug':'inst','name':'US1A1-INST'}, {'slug':'odd-name','name':'Account Realm Player'}]
+    houses={'normal':11,'account':1436,'inst':3017,'odd-name':12}
+    def transport(method,url,*args):
+        path=url.split('?')[0]
+        if path.endswith('/connected-realm/index'):
+            payload={'connected_realms':[{'href':f'https://us.api.blizzard.com/data/wow/connected-realm/{house}?namespace=dynamic-us'} for house in (11,12)]}
+        elif path.endswith('/realm/index'): payload={'realms':realms}
+        else:
+            slug=path.rsplit('/',1)[-1]
+            payload={'category':'United States','is_tournament':False,'connected_realm':{'href':f'https://us.api.blizzard.com/data/wow/connected-realm/{houses[slug]}?namespace=dynamic-us'}}
+        return Response(200,{},json.dumps(payload).encode())
+    client=BlizzardClient(HTTPClient(transport));client._token='fixture';client._expires=10**20
+    result=client.realms()
+    assert [(r['slug'],r.get('is_auction_realm')) for r in result]==[('normal',True),('account',False),('inst',False),('odd-name',True)]
+
+
+def test_refresh_retains_and_reports_unsupported_and_missing_memberships(tmp_path):
+    from dataclasses import replace
+    repo=Repository(tmp_path)
+    class Client:
+        def realms(self): return [{'slug':'agamaggan','house_id':11,'category':'United States','is_auction_realm':True},
+                                  {'slug':'internal','house_id':1436,'category':'United States','is_auction_realm':False}]
+        def auctions(self,house,previous=None):
+            assert house==11
+            return Snapshot('auctions:us:11',None,datetime.now(timezone.utc),None,'blizzard',())
+    class TSM:
+        def region(self,previous=None): raise ValueError('offline')
+    settings=replace(Settings(),buying_realms=('agamaggan','internal','missing'))
+    status=RefreshService(repo,Client(),TSM()).run(settings)
+    assert status['sources'].get('auctions:us:11',{}).get('state')=='success'
+    assert status['sources'].get('auctions:us:1436',{}).get('error_code')=='unsupported_realm'
+    assert status['sources'].get('realm:us:missing',{}).get('error_code')=='realm_unavailable'
+    assert repo.load_settings().buying_realms==settings.buying_realms
+
+
+def test_legacy_cache_index_failure_does_not_classify_or_drop_realms(tmp_path):
+    repo=Repository(tmp_path)
+    legacy=[{'slug':'agamaggan','house_id':11,'category':'United States'}]
+    repo.cache_put('realms',legacy)
+    repo.cache_timed('realms',legacy)
+    class Client:
+        def realms(self): raise ValueError('index unavailable')
+        def auctions(self,*args): raise AssertionError('unverified house must be reported, not queried')
+    class TSM:
+        def region(self,previous=None): raise ValueError('offline')
+    status=RefreshService(repo,Client(),TSM()).run(Settings())
+    assert status['sources'].get('auctions:us:11',{}).get('error_code')=='verification_pending'
+    assert repo.cache_get('realms')==legacy
+    assert repo.load_settings().buying_realms==('agamaggan',)
+
+
+def test_bulk_choices_exclude_internal_and_unverified_us_realms():
+    script=r'''
+const assert=require('node:assert/strict');
+const {realmOptions,bulkBuy}=require('./wowflipper/static/realm-selection.js');
+const realms=[{slug:'player',category:'United States',is_auction_realm:true},
+ {slug:'internal',category:'United States',is_auction_realm:false},
+ {slug:'unverified',category:'United States'},
+ {slug:'oce',category:'Oceanic',is_auction_realm:true}];
+assert.deepEqual(bulkBuy(realms,['internal']),['internal','player']);
+const options=realmOptions(realms,{buying_realms:['internal'],selling_realms:[]});
+assert.deepEqual(options.map(r=>[r.slug,r.legacy]),[['player',false],['internal',true]]);
+'''
+    subprocess.run(['node','-e',script],check=True,cwd=Path(__file__).resolve().parents[1])
+
+
+@pytest.mark.parametrize('payload',[{'connected_realms':[]},{'connected_realms':[{}]},
+    {'connected_realms':[{'href':'https://us.api.blizzard.com/data/wow/realm/11'}]},
+    {'connected_realms':[{'href':'https://example.invalid/data/wow/connected-realm/11'}]}])
+def test_invalid_connected_index_preserves_previously_verified_cache(tmp_path,payload):
+    repo=Repository(tmp_path)
+    verified=[{'slug':'agamaggan','house_id':11,'category':'United States','is_auction_realm':True}]
+    repo.cache_put('realms',verified)
+    client=BlizzardClient(HTTPClient(lambda *args:Response(200,{},json.dumps(payload).encode())))
+    client._token='fixture';client._expires=10**20
+    # Discovery failure keeps the previous classification and usable auction source.
+    client.auctions=lambda house,previous=None:Snapshot('auctions:us:11',None,datetime.now(timezone.utc),None,'blizzard',())
+    class TSM:
+        def region(self,previous=None): raise ValueError('offline')
+    status=RefreshService(repo,client,TSM()).run(Settings())
+    assert status['sources']['realms:us']['state']=='failed'
+    assert status['sources']['realms:us']['using_cached_realms'] is True
+    assert status['sources']['auctions:us:11']['state']=='success'
+    assert repo.cache_get('realms')==verified
+    assert repo.load_settings().buying_realms==('agamaggan',)
+
+
+def test_fresh_classified_cache_migrates_with_one_index_fetch(tmp_path):
+    from dataclasses import replace
+    repo=Repository(tmp_path)
+    legacy=[{'slug':'agamaggan','house_id':11,'category':'United States'},
+            {'slug':'internal','house_id':1436,'category':'United States'}]
+    repo.cache_put('realms',legacy);repo.cache_timed('realms',legacy)
+    class Client:
+        index_calls=0
+        def connected_realm_ids(self): self.index_calls+=1;return {11}
+        def realms(self): raise AssertionError('complete details already cached')
+        def auctions(self,house,previous=None):
+            assert house==11
+            return Snapshot('auctions:us:11',None,datetime.now(timezone.utc),None,'blizzard',())
+    class TSM:
+        def region(self,previous=None): raise ValueError('offline')
+    client=Client();service=RefreshService(repo,client,TSM())
+    settings=replace(Settings(),buying_realms=('agamaggan','internal'))
+    result=service.run(settings)
+    assert result['sources']['auctions:us:11']['state']=='success'
+    assert result['sources']['auctions:us:1436']['error_code']=='unsupported_realm'
+    assert [r['is_auction_realm'] for r in repo.cache_get('realms')]==[True,False]
+    service.run(settings)
+    assert client.index_calls==1
+    assert repo.load_settings().buying_realms==settings.buying_realms
+
+
+def test_empty_realm_catalog_keeps_last_good_cache(tmp_path):
+    repo=Repository(tmp_path)
+    verified=[{'slug':'agamaggan','house_id':11,'category':'United States','is_auction_realm':True}]
+    repo.cache_put('realms',verified)
+    def transport(method,url,*args):
+        data={'connected_realms':[{'href':'https://us.api.blizzard.com/data/wow/connected-realm/11?namespace=dynamic-us'}]} if '/connected-realm/index?' in url else {'realms':[]}
+        return Response(200,{},json.dumps(data).encode())
+    client=BlizzardClient(HTTPClient(transport));client._token='fixture';client._expires=10**20
+    client.auctions=lambda house,previous=None:Snapshot('auctions:us:11',None,datetime.now(timezone.utc),None,'blizzard',())
+    class TSM:
+        def region(self,previous=None): raise ValueError('offline')
+    result=RefreshService(repo,client,TSM()).run(Settings())
+    assert result['sources']['realms:us']['state']=='failed'
+    assert result['sources']['auctions:us:11']['state']=='success'
+    assert repo.cache_get('realms')==verified

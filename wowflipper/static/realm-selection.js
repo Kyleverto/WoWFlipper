@@ -1,9 +1,12 @@
 "use strict";
-// Blizzard's realm detail category is the source of membership, never locale.
+// Mirror backend selectable_us_realm: US category plus canonical house membership.
+function selectableUSRealm(realm) {
+  return realm.category === "United States" && realm.is_auction_realm === true;
+}
 function realmOptions(realms, settings) {
   const selected = new Set([...settings.buying_realms, ...settings.selling_realms]);
-  const options = realms.filter(r => r.category === "United States" || selected.has(r.slug))
-    .map(r => ({...r, legacy: r.category !== "United States"}));
+  const options = realms.filter(r => selectableUSRealm(r) || selected.has(r.slug))
+    .map(r => ({...r, legacy: !selectableUSRealm(r)}));
   const discovered = new Set(realms.map(r => r.slug));
   for (const slug of selected) if (!discovered.has(slug))
     options.push({slug, name: slug, legacy: true});
@@ -11,6 +14,6 @@ function realmOptions(realms, settings) {
 }
 function bulkBuy(realms, selected, clear = false) {
   return clear ? [] : [...new Set([...selected,
-    ...realms.filter(r => r.category === "United States").map(r => r.slug)])];
+    ...realms.filter(selectableUSRealm).map(r => r.slug)])];
 }
-if (typeof module !== "undefined") module.exports = {realmOptions, bulkBuy};
+if (typeof module !== "undefined") module.exports = {selectableUSRealm, realmOptions, bulkBuy};

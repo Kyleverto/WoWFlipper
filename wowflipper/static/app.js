@@ -229,7 +229,7 @@ function renderSources() {
     target.append(
       el(
         "p",
-        "No market evidence yet. Configure credentials, choose realms and refresh, or import your offline files in Settings.",
+        "No market evidence yet. Choose realms and refresh, or import your offline files in Settings.",
       ),
     );
   for (const s of state.sources)
@@ -239,13 +239,43 @@ function renderSources() {
         `${s.source}: ${s.mode.startsWith("offline") ? "Offline evidence" : "Source snapshot"} • age ${age(s.source_time)} • source ${s.source_time || "unknown"} • fetched ${s.fetched_at} • snapshot ${s.snapshot_id}`,
       ),
     );
-  for (const [source, status] of Object.entries(state.refresh.sources || {}))
+  const messages = {
+    auth_missing: "Blizzard credentials are not configured. Set the documented environment variables and restart the server.",
+    auth_denied: "Authentication was denied. Check the configured credentials and API access.",
+    unavailable: "This upstream resource is unavailable. Refresh realm discovery and retry available realms.",
+    rate_limited: "The upstream service rate limit was reached. Wait and refresh again.",
+    upstream_error: "The upstream service is temporarily unavailable. Retry later.",
+    network_error: "The upstream service could not be reached. Check the connection and retry.",
+    invalid_schema: "The source returned invalid data. The previous snapshot was retained; retry later.",
+    unsupported_realm: "This is not an active United States realm in the current connected realm index; it was skipped.",
+    realm_unavailable: "This selected realm is unavailable in current discovery; it was skipped.",
+    verification_pending: "Current realm membership could not be verified. Refresh discovery and retry.",
+    source_error: "The source could not be refreshed. Retry later.",
+  };
+  const sourceLabel = (source) => {
+    if (source === "realms:us") return "United States realm discovery";
+    if (source === "tsm:us") return "Regional valuations";
+    if (source === "toys:us") return "Toy classification";
+    if (source.startsWith("auctions:us:")) {
+      const house = Number(source.split(":")[2]);
+      const names = (state.realms || []).filter(realm => realm.house_id === house)
+        .map(realm => realm.name || realm.slug);
+      return names.length ? `${names.slice(0, 3).join(" / ")}${names.length > 3 ? " / …" : ""} (house ${house})` : `Auction house ${house}`;
+    }
+    if (source.startsWith("realm:us:")) return `Realm ${source.split(":")[2]}`;
+    return "Source";
+  };
+  for (const [source, status] of Object.entries(state.refresh.sources || {})) {
+    const failed = status.state === "failed" || status.state === "skipped";
+    const detail = failed ? messages[status.error_code] || messages.source_error : "";
+    const httpStatus = Number.isInteger(status.http_status) && status.http_status >= 100 && status.http_status <= 599 ? ` (HTTP ${status.http_status})` : "";
     target.append(
       el(
         "p",
-        `${source}: ${status.state}${status.state === "failed" ? " — Configure credentials if needed, retry after rate limits, or inspect imported data." : ""}${status.metadata_skipped ? " • Metadata limit reached; refresh again to enrich remaining items." : ""}`,
+        `${sourceLabel(source)}: ${status.state}${detail ? ` — ${detail}${httpStatus}` : ""}${status.metadata_skipped ? " • Metadata limit reached; refresh again to enrich remaining items." : ""}`,
       ),
     );
+  }
   if (state.refresh.running)
     target.append(el("p", "Refreshing sources… Polling progress."));
 }
@@ -750,7 +780,7 @@ function renderRealmSelection(preserveDraft = false) {
         ` • Shared with ${siblings.map(r => r.name || r.slug).join(", ")}` : "");
     row.dataset.search = `${realm.name || realm.slug} ${realm.slug} ${realm.house_id || ""}`.toLowerCase();
     row.append(el("span", `${realm.name || realm.slug} • ${membership}`));
-    if (realm.legacy) row.append(el("small", `Previously selected • ${realm.category || "classification unknown"}. Retained until explicitly cleared.`, "legacy-realm"));
+    if (realm.legacy) row.append(el("small", `Previously selected • ${realm.is_auction_realm === false ? "unsupported auction realm" : realm.is_auction_realm !== true ? "auction support unverified" : realm.category || "classification unknown"}. Retained until explicitly cleared.`, "legacy-realm"));
     for (const type of ["buying", "selling"]) {
       const label = el("label"), input = el("input");
       input.type = "checkbox";
@@ -758,14 +788,14 @@ function renderRealmSelection(preserveDraft = false) {
       input.dataset.membership = type;
       input.checked = draft[type + "_realms"].includes(realm.slug);
       input.disabled = realm.legacy && !state.settings[type + "_realms"].includes(realm.slug);
-      if (input.disabled) input.title = "This realm is outside the US choices; only its existing membership can be retained or removed.";
+      if (input.disabled) input.title = "This realm is outside the verified US auction choices; only its existing membership can be retained or removed.";
       label.append(input, document.createTextNode(type === "buying" ? "Buy" : "Sell"));
       row.append(label);
       input.onchange = updateRealmCounts;
     }
     $("realm-membership").append(row);
   }
-  $("realm-select-all").disabled = !state.realms.some(r => r.category === "United States");
+  $("realm-select-all").disabled = !state.realms.some(selectableUSRealm);
   filterRealms();
   updateRealmCounts();
 }
@@ -775,7 +805,7 @@ function filterRealms() {
 }
 function updateRealmCounts() {
   const selected = type => [...$("realm-membership").querySelectorAll(`input[data-membership=${type}]:checked`)];
-  $("realm-count").textContent = `${state.realms.filter(r => r.category === "United States").length} US realms discovered • ${selected("buying").length} buying • ${selected("selling").length} selling. Search only changes visibility.`;
+  $("realm-count").textContent = `${state.realms.filter(selectableUSRealm).length} US realms discovered • ${selected("buying").length} buying • ${selected("selling").length} selling. Search only changes visibility.`;
 }
 $("realm-search").oninput = filterRealms;
 for (const [id, clear] of [["realm-select-all", false], ["realm-clear", true]]) {

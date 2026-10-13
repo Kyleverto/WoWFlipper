@@ -4,6 +4,8 @@ import json, threading
 from datetime import datetime, timezone
 from .engine import exclusion_reason
 from .models import is_fresh
+from .realms import auction_realm
+from .sources.http import source_diagnostic
 from concurrent.futures import ThreadPoolExecutor
 
 class RefreshService:
@@ -30,38 +32,63 @@ class RefreshService:
                 self.status['sources']['tsm:us']={'state':'success','snapshot_id':identity,**(snapshot.source_metadata or {})}
                 if self.repository.maintenance_warning: self.status['sources']['tsm:us']['maintenance_warning']=self.repository.maintenance_warning
             except Exception as exc:
-                self.status['sources']['tsm:us']={'state':'failed','error':type(exc).__name__}
+                self.status['sources']['tsm:us']={'state':'failed',**source_diagnostic(exc)}
+            selected=set(settings.buying_realms)|set(settings.selling_realms)
+            cached_realms=self.repository.cache_get('realms') or []
+            realms=cached_realms
             try:
-                realms=self.repository.cache_fresh('realms',86400)
-                if realms is None or any('category' not in realm for realm in realms):
-                    realms=self.client.realms(); self.repository.cache_put('realms',realms); self.repository.cache_timed('realms',realms)
-                selected=set(settings.buying_realms)|set(settings.selling_realms)
-                mapping={r['slug']:r['house_id'] for r in realms}
-                if selected-set(mapping): raise ValueError('Selected realm was not discovered')
+                fresh=self.repository.cache_fresh('realms',86400)
+                if fresh and all('category' in realm and 'house_id' in realm for realm in fresh) and any(not isinstance(realm.get('is_auction_realm'),bool) for realm in fresh) and hasattr(self.client,'connected_realm_ids'):
+                    # Legacy cached details already establish category and house.
+                    # Upgrade them using one authoritative index request.
+                    houses=self.client.connected_realm_ids()
+                    realms=[{**realm,'is_auction_realm':realm.get('house_id') in houses} for realm in fresh]
+                    self.repository.cache_put('realms',realms)
+                    self.repository.cache_timed('realms',realms)
+                elif not fresh or any('category' not in realm or not isinstance(realm.get('is_auction_realm'),bool) for realm in fresh):
+                    realms=self.client.realms()
+                    self.repository.cache_put('realms',realms)
+                    self.repository.cache_timed('realms',realms)
+                else: realms=fresh
                 self.status['sources']['realms:us']={'state':'success'}
             except Exception as exc:
-                self.status['sources']['realms:us']={'state':'failed','error':type(exc).__name__}
-                return self.status
+                # Failed discovery never rewrites known eligibility or settings.
+                # Previously verified houses can continue using the retained cache.
+                realms=cached_realms
+                self.status['sources']['realms:us']={'state':'failed',**source_diagnostic(exc)}
+                if realms: self.status['sources']['realms:us']['using_cached_realms']=True
+            discovered={r['slug']:r for r in realms}
+            mapping={}
+            for slug in sorted(selected):
+                realm=discovered.get(slug)
+                house=realm.get('house_id') if realm else None
+                if realm and auction_realm(realm) and isinstance(house,int) and house>0:
+                    mapping[slug]=house
+                    continue
+                code='realm_unavailable' if realm is None else 'unsupported_realm' if realm.get('is_auction_realm') is False else 'verification_pending'
+                key=f'auctions:us:{house}' if house else f'realm:us:{slug}'
+                status=self.status['sources'].setdefault(key,{'state':'skipped','error_code':code,'realms':[]})
+                status['realms'].append(slug)
             toys={'items':[],'pending':None}
             if 'toy' in settings.categories and hasattr(self.client,'toy_items'):
                 try:
                     toys=self.client.toy_items(self.repository)
                     self.status['sources']['toys:us']={'state':'pending' if toys['pending'] else 'success','pending':toys['pending']}
                 except Exception as exc:
-                    self.status['sources']['toys:us']={'state':'failed','error':type(exc).__name__}
+                    self.status['sources']['toys:us']={'state':'failed',**source_diagnostic(exc)}
             tsm=self.repository.latest('tsm:us')
             # Fetch each house once, then discover buy identities before enriching any
             # destination. Shared item metadata is independent of ask and house order.
             values={r.item_id:r for r in tsm.records} if tsm else {}
             snapshots={}; counts={}
-            buy_houses={mapping[slug] for slug in settings.buying_realms}
-            for house in sorted({mapping[slug] for slug in selected}):
+            buy_houses={mapping[slug] for slug in settings.buying_realms if slug in mapping}
+            for house in sorted(set(mapping.values())):
                 key=f'auctions:us:{house}'
                 try:
                     snapshots[house]=self.client.auctions(house,self.repository.latest(key))
                     counts[house]={'metadata_fetched':0,'metadata_skipped':0}
                 except Exception as exc:
-                    self.status['sources'][key]={'state':'failed','error':type(exc).__name__}
+                    self.status['sources'][key]={'state':'failed',**source_diagnostic(exc)}
             metadata_by_item={}
             for snapshot in snapshots.values():
                 for auction in snapshot.records:
@@ -91,7 +118,7 @@ class RefreshService:
                         metadata_by_item[item]=metadata; counts[house]['metadata_fetched']+=1
                     pending_by_house[house]=pending
                 except Exception as exc:
-                    self.status['sources'][f'auctions:us:{house}']={'state':'failed','error':type(exc).__name__}
+                    self.status['sources'][f'auctions:us:{house}']={'state':'failed',**source_diagnostic(exc)}
                     del snapshots[house]
             for house,pending in pending_by_house.items():
                 counts[house]['metadata_skipped']=sum(metadata_by_item[item] is None for item in pending)
@@ -114,7 +141,7 @@ class RefreshService:
                     if self.repository.maintenance_warning: self.status['sources'][key]['maintenance_warning']=self.repository.maintenance_warning
                 except Exception as exc:
                     # Never expose upstream response bodies, headers or credentials.
-                    self.status['sources'][key]={'state':'failed','error':type(exc).__name__}
+                    self.status['sources'][key]={'state':'failed',**source_diagnostic(exc)}
             return self.status
         finally:
             self.status['running']=False; self._lock.release()
