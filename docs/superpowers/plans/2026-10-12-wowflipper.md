@@ -200,8 +200,8 @@ def test_external_origin_cannot_mutate(client):
 - [x] Add CI running `python -m pytest -q` on Python 3.11 and a current supported Python release. Build/install the package in a clean environment and verify the CLI launches.
 - [x] Run the complete suite, browser workflow and actual TSM parse. Run Blizzard smoke when credentials are locally configured; otherwise report that precise unverified acceptance item and provide the executable command for the user. Do not ask the user to paste secrets into chat.
 - [x] Review diff for defects and secret/runtime data; fix findings and rerun affected tests. Record completed checks and remaining live/in-game validation separately.
-- [ ] Configure origin to the verified repository, inspect remote state again, commit intended source files and push a normal non-force branch update. If the remote has acquired content, fetch and reconcile without overwriting it. Use a feature branch/PR when integration requires review; otherwise publish initial implementation to the empty repository's main branch.
-- [ ] Verify remote commit SHA and provide repository link, commit ID, local run command and material limitations. No completion claim until publication is confirmed.
+- [x] Configure origin to the verified repository, inspect remote state again, commit intended source files and push a normal non-force branch update. If the remote has acquired content, fetch and reconcile without overwriting it. Use a feature branch/PR when integration requires review; otherwise publish initial implementation to the empty repository's main branch.
+- [x] Verify remote commit SHA and provide repository link, commit ID, local run command and material limitations. No completion claim until publication is confirmed.
 
 ## Plan self-review
 
@@ -209,4 +209,4 @@ All design sections map to the six tasks: adapters/storage (1–2), matching/val
 
 ## Execution review
 
-The user approved subagent-driven execution. All six implementation tasks and their reviews are complete, including a whole-branch review and scoped fixes. Live Blizzard verification is deferred by user choice, with credential setup and smoke commands documented. Final publication/remote verification remain the delivery steps below.
+The user approved subagent-driven execution. All six implementation tasks and their reviews are complete, including a whole-branch review and scoped fixes. Live Blizzard verification is deferred by user choice, with credential setup and smoke commands documented. The implementation was published to Kyleverto/WoWFlipper on main, with the remote commit verified against the local commit.

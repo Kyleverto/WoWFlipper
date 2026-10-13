@@ -1,6 +1,6 @@
 # Flip Finder: first-version design
 
-Status: proposed written specification for user review.
+Status: approved by the user and implemented as WoWFlipper. See ../plans/2026-10-12-wowflipper.md and ../../validation.md for execution and verification.
 
 ## Purpose and agreed scope
 
