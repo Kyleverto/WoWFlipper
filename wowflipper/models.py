@@ -79,6 +79,8 @@ class Snapshot:
     records: tuple
     content_hash: str = ''
     source_id: str = ''
+    id: int | None = None
+    raw_payload: bytes = b''
 
 @dataclass(frozen=True)
 class Candidate:

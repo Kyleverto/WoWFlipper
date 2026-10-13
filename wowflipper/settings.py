@@ -23,6 +23,9 @@ class Settings:
     extra_costs: int = 0
     home_realm: str = 'Agamaggan'
     region: str = 'us'
+    buying_realms: tuple = ('agamaggan',)
+    selling_realms: tuple = ()
+    categories: tuple = ('recipe', 'mount', 'toy')
 
     @classmethod
     def from_dict(cls, data: dict):
@@ -36,6 +39,12 @@ class Settings:
                 value = decimal(value, 1 if field.name in {'discount','auction_cut','min_sale_rate'} else None)
             elif isinstance(getattr(default, field.name), int):
                 value = integer(value, 1 if field.name in {'capital','max_copies','max_tsm_age_hours','max_auction_age_hours'} else 0)
+            elif field.name in {'buying_realms','selling_realms','categories'}:
+                import re
+                if not isinstance(value,(list,tuple)) or any(not isinstance(x,str) or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*',x) for x in value):
+                    raise ValueError('Expected realm slugs or category names')
+                value=tuple(dict.fromkeys(value))
+                if field.name=='categories' and set(value)-{'recipe','mount','toy'}: raise ValueError('Unsupported category')
             elif not isinstance(value, str) or not value.strip():
                 raise ValueError('Expected nonempty text')
             values[field.name] = value
