@@ -6,6 +6,7 @@ let state,
   csrf,
   currentTab = "opportunities";
 let resultsSequence = 0;
+let resultsPage = 1, exclusionsPage = 1, exclusionsSequence = 0;
 let correctionDirty = false;
 const pending = new Map(
   JSON.parse(sessionStorage.getItem("pending-ledger-actions") || "[]"),
@@ -151,6 +152,8 @@ function params() {
     q: $("search").value,
     sort: $("sort").value,
     direction: $("direction").value,
+    page: resultsPage,
+    page_size: 100,
   });
 }
 function table(headers) {
@@ -266,19 +269,47 @@ async function loadResults() {
   }
   if (sequence !== resultsSequence) return;
   rows = result.rows;
-  $("export").href = "/api/export?" + query;
+  resultsPage = result.page;
+  const acceptedQuery = new URLSearchParams(query);
+  acceptedQuery.set("page", result.page);
+  acceptedQuery.set("page_size", result.page_size);
+  $("export").href = "/api/export?" + acceptedQuery.toString();
   renderResults();
+  pageControls("result", result);
   $("exclusion-count").textContent =
-    `Inspection exclusions (${result.exclusions.length})`;
+    `Inspection exclusions (${result.exclusion_total})`;
+  ++exclusionsSequence;
+  exclusionsPage = 1;
   $("exclusions").replaceChildren();
-  for (const row of result.exclusions) {
-    $("exclusions").append(
-      el(
-        "p",
-        `${row.name} (${row.item_id}): ${row.reason.replaceAll("_", " ")}`,
-      ),
-    );
+  $("exclusion-pagination").hidden = true;
+  if ($("exclusion-inspection").open) await loadExclusions();
+}
+function pageControls(prefix, result) {
+  const start = result.total ? (result.page - 1) * result.page_size + 1 : 0;
+  const end = Math.min(result.page * result.page_size, result.total);
+  $(prefix + "-page-label").textContent =
+    `${start}–${end} of ${result.total} • Page ${result.page} of ${result.pages}`;
+  $(prefix + "-previous").disabled = result.page <= 1;
+  $(prefix + "-next").disabled = result.page >= result.pages;
+}
+async function loadExclusions() {
+  const sequence = ++exclusionsSequence;
+  let result;
+  try {
+    result = await api(`/api/exclusions?page=${exclusionsPage}&page_size=100`);
+  } catch (error) {
+    if (sequence !== exclusionsSequence) return;
+    throw error;
   }
+  if (sequence !== exclusionsSequence || !$("exclusion-inspection").open) return;
+  exclusionsPage = result.page;
+  $("exclusions").replaceChildren();
+  for (const row of result.rows) {
+    $("exclusions").append(el("p",
+      `${row.name} (${row.item_id}): ${row.reason.replaceAll("_", " ")}`));
+  }
+  $("exclusion-pagination").hidden = false;
+  pageControls("exclusion", result);
 }
 function renderResults() {
   const container = $("results");
@@ -325,6 +356,7 @@ function renderResults() {
       $("sort").value = key;
       if (same)
         $("direction").value = $("direction").value === "desc" ? "asc" : "desc";
+      resultsPage = 1;
       loadResults().catch((e) => message(e.message, true));
     };
     th.replaceChildren(button);
@@ -658,7 +690,11 @@ function renderSettings() {
     : [{ slug: "agamaggan", name: "Agamaggan (not yet discovered)" }];
   for (const realm of realms) {
     const row = el("div", undefined, "realm-row");
-    row.append(el("span", realm.name || realm.slug));
+    const siblings = state.realms.filter((r) => r.house_id === realm.house_id && r.slug !== realm.slug);
+    const membership = realm.house_id == null ? "House not discovered" :
+      `Connected house ${realm.house_id}` + (siblings.length ?
+        ` • Shared with ${siblings.map((r) => r.name || r.slug).join(", ")}` : " • No discovered siblings");
+    row.append(el("span", `${realm.name || realm.slug} • ${membership}`));
     for (const type of ["buying", "selling"]) {
       const label = el("label"),
         input = el("input");
@@ -879,10 +915,32 @@ for (const button of document.querySelectorAll("nav button"))
     }
   };
 for (const id of ["ranking", "sort", "direction", "destination"])
-  $(id).onchange = () => loadResults().catch((e) => message(e.message, true));
+  $(id).onchange = () => {
+    resultsPage = 1;
+    loadResults().catch((e) => message(e.message, true));
+  };
+for (const [prefix, load] of [["result", loadResults], ["exclusion", loadExclusions]]) {
+  for (const [direction, step] of [["previous", -1], ["next", 1]]) {
+    $(prefix + "-" + direction).onclick = () => {
+      if (prefix === "result") resultsPage += step;
+      else exclusionsPage += step;
+      load().catch((e) => message(e.message, true));
+    };
+  }
+}
+$("exclusion-inspection").ontoggle = () => {
+  if ($("exclusion-inspection").open) {
+    loadExclusions().catch((e) => message(e.message, true));
+  } else {
+    ++exclusionsSequence;
+    $("exclusions").replaceChildren();
+    $("exclusion-pagination").hidden = true;
+  }
+};
 let searchTimer;
 $("search").oninput = () => {
   clearTimeout(searchTimer);
+  resultsPage = 1;
   searchTimer = setTimeout(
     () => loadResults().catch((e) => message(e.message, true)),
     180,

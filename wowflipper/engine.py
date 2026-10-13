@@ -111,7 +111,21 @@ def rank(candidates, strategy):
     return result
 
 
-def compare_destinations(candidate, snapshots, settings, now=None):
+def index_destinations(snapshots):
+    """Build one item index per connected house, sharing sibling realm evidence."""
+    index = {}
+    for snap in snapshots.values():
+        if snap is None or snap.source_key in index:
+            continue
+        items = {}
+        for auction in snap.records:
+            if isinstance(auction, Auction):
+                items.setdefault(auction.item_id, []).append(auction)
+        index[snap.source_key] = items
+    return index
+
+
+def compare_destinations(candidate, snapshots, settings, now=None, index=None):
     """snapshots maps configured realm slug to Snapshot. Missing keys are explicit absent evidence.
 
     Returned unit asks are Decimal copper, preserving indivisible stack prices.
@@ -133,7 +147,8 @@ def compare_destinations(candidate, snapshots, settings, now=None):
             elif not is_fresh(snap.source_time, settings.max_auction_age_hours, now):
                 risks.append('stale_destination_evidence')
             else:
-                for a in snap.records:
+                records = snap.records if index is None else index.get(snap.source_key, {}).get(candidate.auction.item_id, ())
+                for a in records:
                     if not isinstance(a, Auction) or a.item_id != candidate.auction.item_id or a.region != candidate.auction.region:
                         continue
                     if snap.source_key != f'auctions:us:{a.house_id}':

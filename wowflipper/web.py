@@ -1,5 +1,5 @@
 """Loopback-only browser adapter. Never exposes upstream exception bodies."""
-import csv, io, os, secrets
+import csv, io, os, secrets, json
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -84,7 +84,9 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
     @app.get('/api/refresh/status')
     def refresh_status(): return jsonify(refresh.status)
     @app.get('/api/results')
-    def results(): return jsonify(rows=market().rows(request.args),exclusions=safe(market().exclusions))
+    def results(): return jsonify(market().page(request.args))
+    @app.get('/api/exclusions')
+    def exclusions(): return jsonify(market().exclusions_page(request.args))
     @app.get('/api/shopping')
     def shopping(): return jsonify(safe(portfolio().shopping()))
     @app.post('/api/shopping')
@@ -104,12 +106,12 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
     @app.get('/api/export')
     def export():
         rows=market().rows(request.args); output=io.StringIO(); writer=csv.writer(output)
-        writer.writerow(['Item','Item ID','Auction ID','Source realms','Quantity','Total buyout copper','Unit buyout copper','Assumed unit resale copper','Estimated net proceeds copper','Estimated profit copper','ROI','Regional sale rate','Regional sold per day','Market value copper','Historical copper','Auction source time','Valuation source time','Snapshot provenance','Mode','Assumptions and risks'])
+        writer.writerow(['Item','Item ID','Auction ID','Source realms','Quantity','Total buyout copper','Unit buyout copper','Assumed unit resale copper','Estimated net proceeds copper','Estimated profit copper','ROI','Regional sale rate','Regional sold per day','Market value copper','Historical copper','Auction source time','Valuation source time','Snapshot provenance','Mode','Auction cut','Extra costs copper','Resale factor','Minimum discount','Minimum profit copper','Minimum ROI','Minimum sale rate','Minimum sold per day','Maximum copies','Maximum auction age hours','Maximum valuation age hours','Destination evidence','Assumptions and risks'])
         def text(value):
             value=str(value)
             return "'"+value if value.lstrip().startswith(('=','+','-','@','\t','\r')) else value
         for row in rows:
             a=row['auction']; v=row['valuation']
-            writer.writerow([text(v['name']),a['item_id'],a['auction_id'],text(', '.join(row['source_realms'])),a['quantity'],a['buyout'],Decimal(a['buyout'])/a['quantity'],str(int(v['avg_sale_price'])*market().settings.resale_factor),row['proceeds'],row['profit'],row['roi'],v['sale_rate'],v['sold_per_day'],v['market_value'],v['historical'],text(a['source_time']),text(v['updated_at']),text(a['provenance']),text('Offline '+row['mode'] if row['mode'].startswith('offline') else row['mode']),text('Regional demand only; manual verification required; '+row['explanation']+'; '+', '.join(row['risks']))])
+            writer.writerow([text(v['name']),a['item_id'],a['auction_id'],text(', '.join(row['source_realms'])),a['quantity'],a['buyout'],Decimal(a['buyout'])/a['quantity'],str(int(v['avg_sale_price'])*market().settings.resale_factor),row['proceeds'],row['profit'],row['roi'],v['sale_rate'],v['sold_per_day'],v['market_value'],v['historical'],text(a['source_time']),text(v['updated_at']),text(a['provenance']),text('Offline '+row['mode'] if row['mode'].startswith('offline') else row['mode']),market().settings.auction_cut,market().settings.extra_costs,market().settings.resale_factor,market().settings.discount,market().settings.min_profit,market().settings.min_roi,market().settings.min_sale_rate,market().settings.min_sold_per_day,market().settings.max_copies,market().settings.max_auction_age_hours,market().settings.max_tsm_age_hours,text(json.dumps(row['comparisons'],separators=(',',':'))),text('Regional demand only; manual verification required; '+row['explanation']+'; '+', '.join(row['risks']))])
         return Response(output.getvalue(),mimetype='text/csv',headers={'Content-Disposition':'attachment; filename=wowflipper-visible.csv'})
     return app

@@ -74,10 +74,11 @@ def test_metadata_cache_and_simple_identity(tmp_path):
     class Client:
         items=[]
         def realms(self): return [{'slug':'agamaggan','house_id':1}]
-        def auctions(self,*a): return Snapshot('auctions:us:1',None,now,None,'blizzard',(Auction('us',1,1,2,1,10,'{"context":0,"bonus_lists":[]}'),Auction('us',1,2,3,1,10,None)))
+        def auctions(self,*a): return Snapshot('auctions:us:1',now,now,None,'blizzard',(Auction('us',1,1,2,1,10,'{"context":0,"bonus_lists":[]}'),Auction('us',1,2,3,1,10,None)))
         def item(self,item): self.items.append(item); return {'category':'recipe','tradeability':True}
     client=Client()
-    RefreshService(repo,client,UnavailableTSM()).run(Settings()); RefreshService(Repository(tmp_path),client,UnavailableTSM()).run(Settings())
+    settings=replace(Settings(),min_profit=0,min_roi=Decimal(0))
+    RefreshService(repo,client,UnavailableTSM()).run(settings); RefreshService(Repository(tmp_path),client,UnavailableTSM()).run(settings)
     assert client.items==[2]
     records=repo.latest('auctions:us:1').records
     assert records[0].metadata['simple_identity'] is True
@@ -137,9 +138,9 @@ def test_tsm_precedes_auctions_and_toy_classification(tmp_path):
         def toy_items(self,repo): return {'items':[123],'pending':1}
         def auctions(self,*args):
             calls.append('auctions')
-            return Snapshot('auctions:us:1',None,now,None,'blizzard',(Auction('us',1,1,123,1,10,None),))
+            return Snapshot('auctions:us:1',now,now,None,'blizzard',(Auction('us',1,1,123,1,10,None),))
         def item(self,item): calls.append('item'); return {'category':'unknown','tradeability':True}
-    result=RefreshService(repo,Client(),TSM()).run(Settings())
+    result=RefreshService(repo,Client(),TSM()).run(replace(Settings(),min_profit=0,min_roi=Decimal(0)))
     assert calls==['tsm','realms','auctions','item']
     assert result['sources']['tsm:us']['state']=='success'
     assert result['sources']['toys:us']['state']=='pending'
