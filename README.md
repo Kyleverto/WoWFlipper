@@ -44,7 +44,9 @@ $env:BLIZZARD_CLIENT_SECRET = 'your-client-secret'
 wowflipper
 ```
 
-Use local shell input or a secret manager; do not paste secrets into chat, commit them or include them in screenshots. TSM's public US CSV requires no credential. Blizzard OAuth client credentials are used only by the backend. Refresh discovers realm slugs and their connected auction houses; realms sharing a house are deduplicated. The default buying realm is Agamaggan (`agamaggan`). Select your own selling realm(s) explicitly in Settings; none are invented or preselected. Discovery currently requests details for each realm and can take time. Refresh shows progress and isolated source failures. Zero qualifying rows is a valid result.
+Use local shell input or a secret manager; do not paste secrets into chat, commit them or include them in screenshots. TSM's public US CSV requires no credential. Blizzard OAuth client credentials are used only by the backend. Refresh discovers realm slugs and their connected auction houses; realms sharing a house are deduplicated. The default buying realm is Agamaggan (`agamaggan`). Select your own selling realm(s) explicitly in Settings; none are invented or preselected. Realm selection uses Blizzard’s explicit United States category, excluding Oceanic, Brazil and Latin America from new choices. Search narrows the displayed list without clearing checked realms. Select all US buying realms adds every discovered US realm; Clear buying selection clears buying selections only. Previously selected non-US or unclassified realms remain labeled so you can explicitly remove them. After upgrading, refresh once to retrieve category labels for older cached realm lists. Discovery currently requests details for each realm and can take time. Refresh shows progress and isolated source failures. Zero qualifying rows is a valid result.
+
+Opportunity analysis is reused across page, search and ranking requests. New snapshots, saved settings, realm mappings and source freshness boundaries invalidate the analysis. The first calculation after a change can still take longer; the page displays loading and error states instead of implying an empty result. Keep the server running while sources refresh.
 
 ## Research assumptions
 
@@ -80,6 +82,8 @@ python -m pytest -q
 python scripts/smoke_live.py --tsm-only
 python scripts/smoke_live.py --data-dir ~/.local/share/wowflipper
 ```
+
+The Python test suite also runs JavaScript behavior tests when Node.js is installed; those tests are skipped on Python-only installations.
 
 Smoke is opt-in and uses real source adapters. Full smoke reads configured settings, discovers realms, fetches configured houses, enriches metadata and runs the opportunity query in temporary storage without changing your ledger. It reports source states and row counts without credentials or upstream bodies. Exit codes: 0 success (including zero qualifying rows), 1 validation/source failure, 2 missing credentials or demo storage. Run full smoke after exporting credentials; source freshness/eligibility may still prevent opportunities. CI runs tests on Python 3.11 and 3.14 and checks a wheel installation outside the checkout. See [validation evidence and remaining checks](docs/validation.md).
 

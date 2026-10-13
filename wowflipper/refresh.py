@@ -33,7 +33,7 @@ class RefreshService:
                 self.status['sources']['tsm:us']={'state':'failed','error':type(exc).__name__}
             try:
                 realms=self.repository.cache_fresh('realms',86400)
-                if realms is None:
+                if realms is None or any('category' not in realm for realm in realms):
                     realms=self.client.realms(); self.repository.cache_put('realms',realms); self.repository.cache_timed('realms',realms)
                 selected=set(settings.buying_realms)|set(settings.selling_realms)
                 mapping={r['slug']:r['house_id'] for r in realms}

@@ -1,6 +1,6 @@
-"""Request-scoped indexing and a shared visible/export query."""
+"""Revision-scoped auction analysis and a shared visible/export query."""
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 from .repository import encode
 from .models import is_fresh
@@ -11,34 +11,77 @@ def safe(value):
 
 class MarketQuery:
     def __init__(self,repo):
+        # One bounded entry per repository, shared across all HTTP request threads.
+        with repo._analysis_lock:
+            while True:
+                now=datetime.now(timezone.utc)
+                revision=repo.analysis_revision()
+                cached=repo._analysis_cache
+                if cached and cached[0]==revision and cached[1]<=now<=cached[2]:
+                    self.__dict__.update(cached[3])
+                    self.now=now
+                    return
+                self._build(repo)
+                if repo.analysis_revision()!=revision:
+                    continue
+                valid_until=self._valid_until()
+                finished=datetime.now(timezone.utc)
+                if finished<self.now or finished>valid_until:
+                    continue
+                repo._analysis_cache=(revision,self.now,valid_until,self.__dict__.copy())
+                self.now=finished
+                return
+
+    def _valid_until(self):
+        deadlines=[]
+        times=[(s.source_time,self.settings.max_auction_age_hours) for s in self.snapshots.values() if s]
+        if self.tsm:
+            times.append((self.tsm.source_time,self.settings.max_tsm_age_hours))
+            times.extend((v.updated_at,self.settings.max_tsm_age_hours) for v in self.values.values())
+        for source_time,hours in times:
+            if source_time is None: continue
+            try:
+                expiry=source_time+timedelta(hours=hours)
+            except OverflowError:
+                # No representable expiry; is_fresh retains its existing semantics.
+                expiry=None
+            if expiry is not None and expiry>=self.now: deadlines.append(expiry)
+            # timestamp() also rejects timestamps more than five minutes ahead.
+            try:
+                eligible=source_time-timedelta(minutes=5)
+            except OverflowError:
+                continue
+            if eligible>self.now: deadlines.append(eligible-timedelta(microseconds=1))
+        return min(deadlines,default=datetime.max.replace(tzinfo=timezone.utc))
+
+    def _build(self,repo):
         self.repo=repo; self.settings=repo.load_settings(); self.now=datetime.now(timezone.utc)
         self.realms=repo.cache_get('realms') or []
         self.mapping={r['slug']:r['house_id'] for r in self.realms}
-        self.tsm=repo.latest('tsm:us')
+        self.tsm=repo.latest('tsm:us',include_payload=False)
         self.values={v.item_id:v for v in self.tsm.records} if self.tsm else {}
         self.snapshots={}
-        self.auctions={}
         self.candidates={}; self.exclusions=[]
         selected=set(self.settings.buying_realms)|set(self.settings.selling_realms)
         for slug in selected:
             house=self.mapping.get(slug)
             if house is None: continue
-            if house not in self.snapshots: self.snapshots[house]=repo.latest(f'auctions:us:{house}')
+            if house not in self.snapshots: self.snapshots[house]=repo.latest(f'auctions:us:{house}',include_payload=False)
         self.destination_snapshots={s:self.snapshots.get(self.mapping.get(s)) for s in self.settings.selling_realms}
         self.destination_index=index_destinations(self.destination_snapshots)
         buy_houses={self.mapping[s] for s in self.settings.buying_realms if s in self.mapping}
+        valuation_fresh=bool(self.tsm and is_fresh(self.tsm.source_time,self.settings.max_tsm_age_hours,self.now))
         for house in sorted(buy_houses):
             snapshot=self.snapshots.get(house)
             if not snapshot: continue
+            provenance=json.dumps({'auction_snapshot':snapshot.id,'auction_hash':snapshot.content_hash,'auction_source_time':str(snapshot.source_time),'valuation_snapshot':self.tsm.id if self.tsm else None,'valuation_hash':self.tsm.content_hash if self.tsm else None,'valuation_source_time':str(self.tsm.source_time) if self.tsm else None,'valuation_mode':self.tsm.mode if self.tsm else None,'mode':snapshot.mode},sort_keys=True)
             for auction in snapshot.records:
-                provenance=json.dumps({'auction_snapshot':snapshot.id,'auction_hash':snapshot.content_hash,'auction_source_time':str(snapshot.source_time),'valuation_snapshot':self.tsm.id if self.tsm else None,'valuation_hash':self.tsm.content_hash if self.tsm else None,'valuation_source_time':str(self.tsm.source_time) if self.tsm else None,'valuation_mode':self.tsm.mode if self.tsm else None,'mode':snapshot.mode},sort_keys=True)
-                auction=replace(auction,source_time=snapshot.source_time,provenance=provenance)
+                auction=replace(auction,source_time=snapshot.source_time)
                 value=self.values.get(auction.item_id)
-                valuation_fresh=bool(self.tsm and is_fresh(self.tsm.source_time,self.settings.max_tsm_age_hours,self.now))
                 candidate=evaluate(auction,value,self.settings,self.now) if value and valuation_fresh else None
                 key=(auction.region,house,auction.auction_id)
-                self.auctions[key]=auction
-                if candidate: self.candidates[key]=candidate
+                if candidate:
+                    self.candidates[key]=replace(candidate,auction=replace(auction,provenance=provenance))
                 else: self.exclusions.append({'key':key,'item_id':auction.item_id,'name':value.name if value else f'Item {auction.item_id}','reason':('stale_or_unknown_valuation_source' if value and not valuation_fresh else exclusion_reason(auction,value,self.settings,self.now)) if value else 'missing-valuation'})
     def candidate(self,key): return self.candidates.get(tuple(key))
     def _ordered(self,args):

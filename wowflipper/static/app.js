@@ -6,6 +6,7 @@ let state,
   csrf,
   currentTab = "opportunities";
 let resultsSequence = 0;
+let resultsRequest = null;
 let resultsPage = 1, exclusionsPage = 1, exclusionsSequence = 0;
 let correctionDirty = false;
 const pending = new Map(
@@ -78,7 +79,7 @@ function message(text, error = false) {
   $("message").textContent = text;
   $("message").className = error ? "error" : "";
 }
-async function api(path, data) {
+async function api(path, data, options = {}) {
   const opts =
     data === undefined
       ? {}
@@ -89,8 +90,9 @@ async function api(path, data) {
         };
   let response;
   try {
-    response = await fetch(path, opts);
+    response = await fetch(path, {...opts, ...options});
   } catch (error) {
+    if (error.name === "AbortError") throw error;
     throw Error(
       "Connection interrupted. Retry this action; its request ID is preserved until success.",
     );
@@ -143,7 +145,7 @@ async function action(button, work) {
   } catch (error) {
     message(error.message, true);
   } finally {
-    button.disabled = false;
+    button.disabled = button.id === "refresh" && (state?.refresh.running || state?.mode === "offline-demo");
   }
 }
 function params() {
@@ -187,11 +189,13 @@ async function loadState(initial = false) {
     state.mode === "offline-demo"
       ? "Offline demo • synthetic market"
       : "Local research";
-  $("refresh").disabled = state.mode === "offline-demo";
+  $("refresh").disabled = state.mode === "offline-demo" || state.refresh.running;
+  $("refresh").textContent = state.refresh.running ? "Refreshing sources…" : "Refresh sources";
   renderCapital();
   renderSources();
   renderLedger();
   if (initial) renderSettings();
+  else if (currentTab === "settings") renderRealmSelection(true);
   populateDestinations();
 }
 function renderCapital() {
@@ -256,18 +260,55 @@ function populateDestinations() {
       new Option("Choose selling realms in Settings", ""),
     );
 }
-async function loadResults() {
+function invalidateResults(text = "Loading opportunities…") {
+  rows = [];
+  $("results").replaceChildren();
+  $("results").setAttribute("aria-busy", "true");
+  $("results-status").textContent = text;
+  $("export").removeAttribute("href");
+  $("export").setAttribute("aria-disabled", "true");
+  $("result-previous").disabled = true;
+  $("result-next").disabled = true;
+  $("result-page-label").textContent = "";
+  ++exclusionsSequence;
+  $("exclusions").replaceChildren();
+  $("exclusion-pagination").hidden = true;
+}
+function retireResults() {
+  resultsRequest?.controller.abort();
+  resultsRequest = null;
+  ++resultsSequence;
+  invalidateResults();
+}
+function loadResults(force = false) {
   const query = params().toString();
+  if (!force && resultsRequest?.query === query) return resultsRequest.promise;
+  resultsRequest?.controller.abort();
   const sequence = ++resultsSequence;
+  const controller = new AbortController();
+  invalidateResults();
+  const request = {query, controller};
+  resultsRequest = request;
+  request.promise = performResults(query, sequence, controller.signal).finally(() => {
+    if (resultsRequest === request) resultsRequest = null;
+  });
+  return request.promise;
+}
+async function performResults(query, sequence, signal) {
   let result;
   try {
-    result = await api("/api/results?" + query);
+    result = await api("/api/results?" + query, undefined, {signal});
   } catch (error) {
     // An obsolete request must not overwrite a newer result or its error state.
     if (sequence !== resultsSequence) return;
+    $("results").setAttribute("aria-busy", "false");
+    $("results-status").textContent = "Loading failed. " + error.message;
     throw error;
   }
   if (sequence !== resultsSequence) return;
+  $("results").setAttribute("aria-busy", "false");
+  $("results-status").textContent = `Loaded ${result.rows.length} opportunities (${result.total} total).`;
+  $("export").setAttribute("aria-disabled", "false");
   rows = result.rows;
   resultsPage = result.page;
   const acceptedQuery = new URLSearchParams(query);
@@ -684,35 +725,66 @@ function renderSettings() {
     label.append(input, document.createTextNode(category));
     $("filter-settings").append(label);
   }
-  $("realm-membership").replaceChildren();
-  const realms = state.realms.length
-    ? state.realms
-    : [{ slug: "agamaggan", name: "Agamaggan (not yet discovered)" }];
-  for (const realm of realms) {
-    const row = el("div", undefined, "realm-row");
-    const siblings = state.realms.filter((r) => r.house_id === realm.house_id && r.slug !== realm.slug);
-    const membership = realm.house_id == null ? "House not discovered" :
-      `Connected house ${realm.house_id}` + (siblings.length ?
-        ` • Shared with ${siblings.map((r) => r.name || r.slug).join(", ")}` : " • No discovered siblings");
-    row.append(el("span", `${realm.name || realm.slug} • ${membership}`));
-    for (const type of ["buying", "selling"]) {
-      const label = el("label"),
-        input = el("input");
-      input.type = "checkbox";
-      input.dataset.realm = realm.slug;
-      input.dataset.membership = type;
-      input.checked = state.settings[type + "_realms"].includes(realm.slug);
-      label.append(
-        input,
-        document.createTextNode(type === "buying" ? "Buy" : "Sell"),
-      );
-      row.append(label);
-    }
-    $("realm-membership").append(row);
-  }
+  renderRealmSelection();
   $("credential-status").textContent = state.credentials_configured
     ? "Blizzard credentials are configured in the process environment."
     : "Blizzard credentials are not configured. Set the documented environment variables before starting live refresh. Credentials are never entered or returned here.";
+}
+function renderRealmSelection(preserveDraft = false) {
+  const draft = {};
+  for (const type of ["buying", "selling"]) {
+    draft[type + "_realms"] = preserveDraft ?
+      [...$("realm-membership").querySelectorAll(`input[data-membership=${type}]:checked`)].map(n => n.dataset.realm) :
+      state.settings[type + "_realms"];
+  }
+  $("realm-membership").replaceChildren();
+  // Keep saved legacy rows visible even if unchecked in this unsaved draft.
+  const membership = {buying_realms: [...new Set([...draft.buying_realms, ...state.settings.buying_realms])],
+    selling_realms: [...new Set([...draft.selling_realms, ...state.settings.selling_realms])]};
+  const realms = realmOptions(state.realms, membership);
+  for (const realm of realms) {
+    const row = el("div", undefined, "realm-row");
+    const siblings = state.realms.filter(r => r.house_id === realm.house_id && r.slug !== realm.slug);
+    const membership = realm.house_id == null ? "House not discovered" :
+      `Connected house ${realm.house_id}` + (siblings.length ?
+        ` • Shared with ${siblings.map(r => r.name || r.slug).join(", ")}` : "");
+    row.dataset.search = `${realm.name || realm.slug} ${realm.slug} ${realm.house_id || ""}`.toLowerCase();
+    row.append(el("span", `${realm.name || realm.slug} • ${membership}`));
+    if (realm.legacy) row.append(el("small", `Previously selected • ${realm.category || "classification unknown"}. Retained until explicitly cleared.`, "legacy-realm"));
+    for (const type of ["buying", "selling"]) {
+      const label = el("label"), input = el("input");
+      input.type = "checkbox";
+      input.dataset.realm = realm.slug;
+      input.dataset.membership = type;
+      input.checked = draft[type + "_realms"].includes(realm.slug);
+      input.disabled = realm.legacy && !state.settings[type + "_realms"].includes(realm.slug);
+      if (input.disabled) input.title = "This realm is outside the US choices; only its existing membership can be retained or removed.";
+      label.append(input, document.createTextNode(type === "buying" ? "Buy" : "Sell"));
+      row.append(label);
+      input.onchange = updateRealmCounts;
+    }
+    $("realm-membership").append(row);
+  }
+  $("realm-select-all").disabled = !state.realms.some(r => r.category === "United States");
+  filterRealms();
+  updateRealmCounts();
+}
+function filterRealms() {
+  const query = $("realm-search").value.trim().toLowerCase();
+  for (const row of $("realm-membership").children) row.hidden = !row.dataset.search.includes(query);
+}
+function updateRealmCounts() {
+  const selected = type => [...$("realm-membership").querySelectorAll(`input[data-membership=${type}]:checked`)];
+  $("realm-count").textContent = `${state.realms.filter(r => r.category === "United States").length} US realms discovered • ${selected("buying").length} buying • ${selected("selling").length} selling. Search only changes visibility.`;
+}
+$("realm-search").oninput = filterRealms;
+for (const [id, clear] of [["realm-select-all", false], ["realm-clear", true]]) {
+  $(id).onclick = () => {
+    const inputs = [...$("realm-membership").querySelectorAll('input[data-membership=buying]')];
+    const selected = bulkBuy(state.realms, inputs.filter(n => n.checked).map(n => n.dataset.realm), clear);
+    for (const input of inputs) input.checked = selected.includes(input.dataset.realm);
+    updateRealmCounts();
+  };
 }
 function outcomeFields() {
   const type = $("event-type").value;
@@ -872,9 +944,10 @@ $("settings-form").onsubmit = (event) => {
       (c) => $("category-" + c).checked,
     );
     await api("/api/settings", data);
+    retireResults();
     message("Settings saved.");
     await loadState(true);
-    await loadResults();
+    await loadResults(true);
     await loadShopping();
   });
 };
@@ -889,15 +962,16 @@ $("import-form").onsubmit = (event) => {
       source_time: $("import-time").value || null,
       house_id: Number($("import-house").value),
     });
+    retireResults();
     message(`${result.records} offline records imported. ${result.warning}`);
     await loadState();
-    await loadResults();
+    await loadResults(true);
   });
 };
 $("refresh").onclick = () =>
   action($("refresh"), async () => {
     await api("/api/refresh", {});
-    message("Refreshing official sources. Existing evidence remains visible.");
+    message("Refreshing official sources. Progress appears under Source evidence and refresh progress.");
     await loadState();
   });
 for (const button of document.querySelectorAll("nav button"))
@@ -940,6 +1014,10 @@ $("exclusion-inspection").ontoggle = () => {
 let searchTimer;
 $("search").oninput = () => {
   clearTimeout(searchTimer);
+  resultsRequest?.controller.abort();
+  resultsRequest = null;
+  ++resultsSequence;
+  invalidateResults("Waiting for search…");
   resultsPage = 1;
   searchTimer = setTimeout(
     () => loadResults().catch((e) => message(e.message, true)),
@@ -988,18 +1066,23 @@ $("correction-fields").onchange = () => {
     message(error.message, true);
   }
 })();
+let refreshPollRunning = false;
 setInterval(async () => {
-  if (!state?.refresh.running) return;
+  if (!state?.refresh.running || refreshPollRunning) return;
+  refreshPollRunning = true;
   try {
     await loadState();
     if (!state.refresh.running) {
+      retireResults();
       message(
         "Refresh completed. Inspect source errors and source ages before selecting.",
       );
-      await loadResults();
+      await loadResults(true);
       if (currentTab === "shopping") await loadShopping();
     }
   } catch (error) {
     message(error.message, true);
+  } finally {
+    refreshPollRunning = false;
   }
 }, 2000);

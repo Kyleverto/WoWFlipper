@@ -14,11 +14,13 @@ def encode(value):
 class Repository:
     def __init__(self,path):
         self._publish_lock=threading.Lock()
+        self._analysis_lock=threading.Lock()
+        self._analysis_cache=None
         self.maintenance_warning=None
         self.path=Path(path); self.path.mkdir(parents=True,exist_ok=True)
         self.payloads=self.path/'payloads'; self.payloads.mkdir(exist_ok=True)
         with self.connect() as db:
-            db.executescript('CREATE TABLE IF NOT EXISTS snapshots(id INTEGER PRIMARY KEY, source TEXT, data TEXT, payload TEXT); CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, data TEXT); CREATE TABLE IF NOT EXISTS provenance(id INTEGER PRIMARY KEY, source TEXT, data TEXT);')
+            db.executescript('CREATE TABLE IF NOT EXISTS snapshots(id INTEGER PRIMARY KEY, source TEXT, data TEXT, payload TEXT); CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, data TEXT); CREATE TABLE IF NOT EXISTS provenance(id INTEGER PRIMARY KEY, source TEXT, data TEXT); CREATE INDEX IF NOT EXISTS snapshots_source_id ON snapshots(source,id);')
     def connect(self): return sqlite3.connect(self.path/'market.sqlite3',timeout=10)
     def publish(self,snapshot):
         with self._publish_lock: return self._publish(snapshot)
@@ -63,7 +65,7 @@ class Repository:
         with self.connect() as db: referenced={r[0] for r in db.execute('SELECT payload FROM snapshots')}
         for file in self.payloads.glob('*.json'):
             if file.name not in referenced: file.unlink(missing_ok=True)
-    def latest(self,source_key):
+    def latest(self,source_key, *, include_payload=True):
         with self.connect() as db: row=db.execute('SELECT id,data,payload FROM snapshots WHERE source=? ORDER BY id DESC LIMIT 1',(source_key,)).fetchone()
         if row is None: return None
         identity,serialized,payload=row; data=json.loads(serialized); record_type=data.pop('record_type')
@@ -78,7 +80,25 @@ class Repository:
                 record['updated_at']=datetime.fromisoformat(record['updated_at'])
                 for key in ('sale_rate','sold_per_day'): record[key]=Decimal(record[key])
                 records.append(Valuation(**record))
-        return Snapshot(**data,records=tuple(records),id=identity,raw_payload=(self.payloads/payload).read_bytes())
+        return Snapshot(**data,records=tuple(records),id=identity,raw_payload=(self.payloads/payload).read_bytes() if include_payload else b'')
+    def analysis_revision(self):
+        """Read small invalidation tokens in one consistent SQLite transaction."""
+        with self.connect() as db:
+            db.execute('BEGIN')
+            settings=tuple(db.execute("SELECT key,data FROM cache WHERE key IN ('settings','realms') ORDER BY key"))
+            snapshots=tuple(db.execute('SELECT source,MAX(id) FROM snapshots GROUP BY source ORDER BY source'))
+        return settings,snapshots
+
+    def latest_metadata(self):
+        """Return source status without decoding auction records or raw payloads."""
+        with self.connect() as db:
+            rows=db.execute('SELECT s.source,s.id,p.data FROM snapshots s JOIN provenance p ON p.id=s.id WHERE s.id=(SELECT MAX(x.id) FROM snapshots x WHERE x.source=s.source) ORDER BY s.source').fetchall()
+        result=[]
+        for source,identity,serialized in rows:
+            data=json.loads(serialized)
+            result.append({'source':source,'snapshot_id':identity,**{key:data[key] for key in ('source_time','fetched_at','mode')}})
+        return result
+
     def cache_get(self,key):
         with self.connect() as db: row=db.execute('SELECT data FROM cache WHERE key=?',(key,)).fetchone()
         return json.loads(row[0]) if row else None

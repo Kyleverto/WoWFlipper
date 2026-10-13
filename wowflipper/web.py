@@ -60,11 +60,7 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
     @app.get('/api/state')
     def state():
         session.setdefault('csrf',secrets.token_urlsafe(32))
-        sources=[]
-        with repo.connect() as db: keys=[r[0] for r in db.execute('SELECT DISTINCT source FROM snapshots')]
-        for key in keys:
-            snap=repo.latest(key)
-            sources.append({'source':key,'snapshot_id':snap.id,'source_time':snap.source_time,'fetched_at':snap.fetched_at,'mode':snap.mode})
+        sources=repo.latest_metadata()
         return jsonify(safe({'csrf':session['csrf'],'settings':repo.load_settings().to_dict(),'realms':repo.cache_get('realms') or [],'mode':repo.cache_get('mode') or 'live','sources':sources,'refresh':refresh.status,'credentials_configured':bool(os.environ.get('BLIZZARD_CLIENT_ID') and os.environ.get('BLIZZARD_CLIENT_SECRET')),'summary':portfolio().summary(),'history':portfolio().history()}))
     @app.get('/api/realms')
     def realms(): return jsonify(repo.cache_get('realms') or [])
@@ -73,8 +69,10 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
         data=body(repo.load_settings().to_dict())
         old=repo.load_settings(); updated=Settings.from_dict({**old.to_dict(),**data})
         if portfolio().history() and updated.capital!=old.capital: raise ValueError('Initial capital is frozen after ledger activity. Record a balance adjustment instead.')
-        discovered={r['slug'] for r in repo.cache_get('realms') or []}
-        if discovered and (set(updated.buying_realms)|set(updated.selling_realms))-discovered: raise ValueError('Select realms from the discovered list')
+        selectable={r['slug'] for r in repo.cache_get('realms') or [] if r.get('category')=='United States'}
+        for field in ('buying_realms','selling_realms'):
+            added=set(getattr(updated,field))-set(getattr(old,field))
+            if added-selectable: raise ValueError('Select realms from the discovered US list')
         repo.save_settings(updated); return jsonify(updated.to_dict())
     @app.post('/api/refresh')
     def start_refresh():

@@ -47,7 +47,13 @@ class BlizzardClient:
             href=detail.get('connected_realm',{}).get('href','')
             try: house=int(href.split('?')[0].rstrip('/').split('/')[-1])
             except ValueError: raise ValueError('Invalid connected realm') from None
-            result.append({**realm,'house_id':house})
+            # The us namespace includes Oceanic/Brazil/Latin America. Only the
+            # official realm detail category establishes United States membership.
+            result.append({**realm,'house_id':house,
+                'category':detail.get('category'), 'locale':detail.get('locale'),
+                'timezone':detail.get('timezone'),
+                'is_us':detail.get('category') == 'United States',
+                'is_tournament':detail.get('is_tournament',False)})
         return result
 
     def item(self,item_id):
