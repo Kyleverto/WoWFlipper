@@ -156,3 +156,11 @@ def test_tsm_invalid_download_preserves_cache(tmp_path):
     result=RefreshService(repo,Client(),TSMClient(HTTPClient(lambda *a:Response(200,{},b'truncated')))).run(Settings())
     assert result['sources']['tsm:us']['state']=='failed'
     assert repo.latest('tsm:us').id==identity
+
+def test_tsm_download_accepts_valid_rows_with_blank_name_exclusions():
+    from wowflipper.sources.tsm import TSMClient
+    raw=b'itemId,name,marketValue,historical,avgSalePrice,saleRate,soldPerDay,updatedAt\n2,fixture,10,10,10,0.1,1,2020-01-01T00:00:00Z\n3,,10,10,10,0.1,1,2020-01-01T00:00:00Z\n'
+    snapshot=TSMClient(HTTPClient(lambda *a:Response(200,{},raw))).region()
+    assert [record.item_id for record in snapshot.records]==[2]
+    assert snapshot.source_metadata=={'accepted_rows':1,'rejected_rows':1}
+    assert snapshot.records[0].updated_at==snapshot.source_time

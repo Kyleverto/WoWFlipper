@@ -68,8 +68,8 @@ class TSMClient:
         if response.status!=200: raise SourceError(f'TSM request failed ({response.status})')
         try: report=parse_region_report(response.body.decode('utf-8-sig'))
         except UnicodeError: raise ValueError('Invalid TSM text encoding') from None
-        if report.rejected_rows or not report.records: raise ValueError('Invalid TSM regional rows')
+        if not report.records: raise ValueError('Invalid TSM regional rows')
         times={record.updated_at for record in report.records}
         if len(times)!=1: raise ValueError('Inconsistent TSM scan timestamps')
         modified=next((v for k,v in response.headers.items() if k.lower()=='last-modified'),None)
-        return Snapshot('tsm:us',next(iter(times)),now,modified,'tsm',tuple(report.records),raw_payload=response.body)
+        return Snapshot('tsm:us',next(iter(times)),now,modified,'tsm',tuple(report.records),raw_payload=response.body,source_metadata={'accepted_rows':len(report.records),'rejected_rows':report.rejected_rows})

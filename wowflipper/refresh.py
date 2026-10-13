@@ -24,7 +24,7 @@ class RefreshService:
             try:
                 snapshot=self.tsm_client.region(self.repository.latest('tsm:us'))
                 identity=self.repository.publish(snapshot)
-                self.status['sources']['tsm:us']={'state':'success','snapshot_id':identity}
+                self.status['sources']['tsm:us']={'state':'success','snapshot_id':identity,**(snapshot.source_metadata or {})}
                 if self.repository.maintenance_warning: self.status['sources']['tsm:us']['maintenance_warning']=self.repository.maintenance_warning
             except Exception as exc:
                 self.status['sources']['tsm:us']={'state':'failed','error':type(exc).__name__}

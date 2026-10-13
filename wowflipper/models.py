@@ -81,6 +81,7 @@ class Snapshot:
     source_id: str = ''
     id: int | None = None
     raw_payload: bytes = b''
+    source_metadata: dict | None = None
 
 @dataclass(frozen=True)
 class Candidate:
