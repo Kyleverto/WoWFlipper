@@ -82,7 +82,7 @@ All monetary attributes are integer copper, rates are Decimal, times are timezon
 
 **Interfaces:** `parse_region(text: str) -> list[Valuation]`; `Settings.from_dict(data: dict) -> Settings`; `normalize_auction(data: dict, house_id: int, region: str) -> Auction | None`.
 
-- [ ] Write failing parser/settings tests. Use an explicit eight-column CSV fixture and this currency assertion:
+- [x] Write failing parser/settings tests. Use an explicit eight-column CSV fixture and this currency assertion:
 
 ```python
 def test_regional_copper_and_demand_are_preserved():
@@ -93,11 +93,11 @@ def test_regional_copper_and_demand_are_preserved():
     assert row.updated_at.utcoffset().total_seconds() == 0
 ```
 
-- [ ] Run `python -m pytest tests/test_inputs.py -q`, confirm missing implementation fails.
-- [ ] Implement strict CSV headers, finite/nonnegative rates, integral money, positive quantities, timezone-aware timestamps, settings bounds and unknown-age handling. Reject NaN/infinity, negative buyout, boolean IDs, future market timestamps beyond five minutes, and duplicate conflicting IDs. Extra CSV columns are allowed. Row failures are counted and exposed; missing required headers fail the entire source.
-- [ ] Use settings defaults of 100g minimum profit, 10% minimum return, 0.01 minimum sale rate, 0.01 sold/day, 48-hour TSM age, 2-hour auction age, one copy per item, zero extra costs. Label these unvalidated provisional filters. Validate allocation plus reserve against configured capital.
-- [ ] Run parser tests and a separate smoke parse of the downloaded real CSV. Record counts without committing downloaded data.
-- [ ] Commit package and input validation.
+- [x] Run `python -m pytest tests/test_inputs.py -q`, confirm missing implementation fails.
+- [x] Implement strict CSV headers, finite/nonnegative rates, integral money, positive quantities, timezone-aware timestamps, settings bounds and unknown-age handling. Reject NaN/infinity, negative buyout, boolean IDs, future market timestamps beyond five minutes, and duplicate conflicting IDs. Extra CSV columns are allowed. Row failures are counted and exposed; missing required headers fail the entire source.
+- [x] Use settings defaults of 100g minimum profit, 10% minimum return, 0.01 minimum sale rate, 0.01 sold/day, 48-hour TSM age, 2-hour auction age, one copy per item, zero extra costs. Label these unvalidated provisional filters. Validate allocation plus reserve against configured capital.
+- [x] Run parser tests and a separate smoke parse of the downloaded real CSV. Record counts without committing downloaded data.
+- [x] Commit package and input validation.
 
 ### Task 2: Source adapters and atomic persistence
 
@@ -105,7 +105,7 @@ def test_regional_copper_and_demand_are_preserved():
 
 **Interfaces:** `BlizzardClient.realms() -> list[dict]`; `BlizzardClient.auctions(house_id: int) -> Snapshot`; `Repository.publish(snapshot: Snapshot) -> int`; `Repository.latest(source_key: str) -> Snapshot | None`; `RefreshService.run(settings: Settings) -> dict`.
 
-- [ ] Write failing transport, deduplication and preservation tests with an injected fake HTTP transport:
+- [x] Write failing transport, deduplication and preservation tests with an injected fake HTTP transport:
 
 ```python
 def test_failed_refresh_preserves_success(repo, valid_snapshot, malformed_snapshot):
@@ -115,14 +115,14 @@ def test_failed_refresh_preserves_success(repo, valid_snapshot, malformed_snapsh
     assert repo.latest(valid_snapshot.source_key).id == first_id
 ```
 
-- [ ] Run `python -m pytest tests/test_sources.py tests/test_repository.py -q` and confirm failures.
-- [ ] Verify current Blizzard OAuth and Game Data contracts from official documentation. Implement backend client-credentials auth, token-expiry caching and one renewal on 401. Read `BLIZZARD_CLIENT_ID` and `BLIZZARD_CLIENT_SECRET` from environment; never echo secret-bearing responses or headers.
-- [ ] Discover realm/connected-realm membership; deduplicate the union of selected buying/selling houses. Query realm auctions, not region commodities. Fetch cached item metadata to classify supported identities; do not guess categories from names. Unknown metadata goes to inspection.
-- [ ] Implement HTTPS-only allowlisted upstreams, finite response-size limits, connect/read timeouts, at most three attempts, and Retry-After handling. Long Retry-After defers the source instead of retrying early. Retry transient transport/429/5xx failures, not bad schemas or invalid credentials.
-- [ ] Store source scan time, HTTP Last-Modified, and local fetch time separately. Auction freshness derives from verified snapshot metadata; missing timestamp remains unknown. Conditional 304 retains original market time.
-- [ ] Write raw payload to a temporary file, atomically rename, then publish normalized records in one SQLite transaction. Cleanup of unreferenced payloads follows commit; keep two successful snapshots per source and compact provenance needed by ledger references.
-- [ ] Track per-source status and errors; partial failure retains previous records with their original age. Reject overlapping refresh requests; use one background worker and polling status endpoint.
-- [ ] Run tests including interrupted publication, truncated JSON, unknown timestamps, token expiry, 429, duplicate houses and partial realm failure; commit adapters and persistence.
+- [x] Run `python -m pytest tests/test_sources.py tests/test_repository.py -q` and confirm failures.
+- [x] Verify current Blizzard OAuth and Game Data contracts from official documentation. Implement backend client-credentials auth, token-expiry caching and one renewal on 401. Read `BLIZZARD_CLIENT_ID` and `BLIZZARD_CLIENT_SECRET` from environment; never echo secret-bearing responses or headers.
+- [x] Discover realm/connected-realm membership; deduplicate the union of selected buying/selling houses. Query realm auctions, not region commodities. Fetch cached item metadata to classify supported identities; do not guess categories from names. Unknown metadata goes to inspection.
+- [x] Implement HTTPS-only allowlisted upstreams, finite response-size limits, connect/read timeouts, at most three attempts, and Retry-After handling. Long Retry-After defers the source instead of retrying early. Retry transient transport/429/5xx failures, not bad schemas or invalid credentials.
+- [x] Store source scan time, HTTP Last-Modified, and local fetch time separately. Auction freshness derives from verified snapshot metadata; missing timestamp remains unknown. Conditional 304 retains original market time.
+- [x] Write raw payload to a temporary file, atomically rename, then publish normalized records in one SQLite transaction. Cleanup of unreferenced payloads follows commit; keep two successful snapshots per source and compact provenance needed by ledger references.
+- [x] Track per-source status and errors; partial failure retains previous records with their original age. Reject overlapping refresh requests; use one background worker and polling status endpoint.
+- [x] Run tests including interrupted publication, truncated JSON, unknown timestamps, token expiry, 429, duplicate houses and partial realm failure; commit adapters and persistence.
 
 ### Task 3: Pure deal engine and destination comparison
 
@@ -130,7 +130,7 @@ def test_failed_refresh_preserves_success(repo, valid_snapshot, malformed_snapsh
 
 **Interfaces:** `evaluate(auction: Auction, valuation: Valuation, settings: Settings, now: datetime) -> Candidate | None`; `rank(candidates: list[Candidate], strategy: str) -> list[Candidate]`; `compare_destinations(candidate, snapshots, settings) -> list[dict]`.
 
-- [ ] Write failing calculation tests, including the brief's example under permissive budget settings:
+- [x] Write failing calculation tests, including the brief's example under permissive budget settings:
 
 ```python
 def test_profit_after_cut(example_auction, example_value, permissive_settings, now):
@@ -139,12 +139,12 @@ def test_profit_after_cut(example_auction, example_value, permissive_settings, n
     assert candidate.profit == 100_000_000
 ```
 
-- [ ] Run `python -m pytest tests/test_engine.py -q` and confirm failure.
-- [ ] Implement Decimal arithmetic and floor rounding. For quantity q, compare full buyout against per-unit ceiling multiplied by q; profit subtracts full purchase and configured per-listing costs. Never round a per-unit purchase down before threshold comparison.
-- [ ] Gate stale/unknown sources, invalid valuations, missing item metadata, unsupported complex variants and pets. Support confirmed simple non-commodity identities. Gear needs exact valuation correspondence, which the verified regional CSV does not supply: place ambiguous gear in inspection, not actionable rankings.
-- [ ] Rank stronger-demand by sold/day, sale rate, return, profit; longer-term by profit, return, sold/day, sale rate. Use stable auction identity as final tie-breaker. Return reasons and explicit risk flags.
-- [ ] Compare exact-match, fresh destination asking prices and quantities. Flag competition below assumed resale, absent destination evidence, and unverified transfer eligibility. Exclude the candidate listing itself from competition where source equals destination.
-- [ ] Test boundary equality, one-copper rounding, stacks, stale destinations, absent destinations, variant mismatch, and deterministic rankings; commit engine.
+- [x] Run `python -m pytest tests/test_engine.py -q` and confirm failure.
+- [x] Implement Decimal arithmetic and floor rounding. For quantity q, compare full buyout against per-unit ceiling multiplied by q; profit subtracts full purchase and configured per-listing costs. Never round a per-unit purchase down before threshold comparison.
+- [x] Gate stale/unknown sources, invalid valuations, missing item metadata, unsupported complex variants and pets. Support confirmed simple non-commodity identities. Gear needs exact valuation correspondence, which the verified regional CSV does not supply: place ambiguous gear in inspection, not actionable rankings.
+- [x] Rank stronger-demand by sold/day, sale rate, return, profit; longer-term by profit, return, sold/day, sale rate. Use stable auction identity as final tie-breaker. Return reasons and explicit risk flags.
+- [x] Compare exact-match, fresh destination asking prices and quantities. Flag competition below assumed resale, absent destination evidence, and unverified transfer eligibility. Exclude the candidate listing itself from competition where source equals destination.
+- [x] Test boundary equality, one-copper rounding, stacks, stale destinations, absent destinations, variant mismatch, and deterministic rankings; commit engine.
 
 ### Task 4: Shopping list and transactional outcome ledger
 
@@ -152,7 +152,7 @@ def test_profit_after_cut(example_auction, example_value, permissive_settings, n
 
 **Interfaces:** `Portfolio.select(candidate_key, strategy, destination, request_id) -> dict`; `Portfolio.record(event: dict, request_id: str) -> dict`; `Portfolio.summary() -> dict`.
 
-- [ ] Write failing tests with synthetic candidate data:
+- [x] Write failing tests with synthetic candidate data:
 
 ```python
 def test_duplicate_purchase_is_idempotent(portfolio, purchase_event):
@@ -162,11 +162,11 @@ def test_duplicate_purchase_is_idempotent(portfolio, purchase_event):
     assert portfolio.summary()['cash'] == 300_000_000 - purchase_event['cost']
 ```
 
-- [ ] Run `python -m pytest tests/test_portfolio.py -q` and confirm failure.
-- [ ] Store append-only purchase, partial-sale, fee, rejection, expiration, cancellation, balance-adjustment and correction events. Request IDs have a unique constraint; reusing an ID for different payloads is an error. Corrections reverse/replay a consistent event chain and reject negative inventory or invalid dependent sales.
-- [ ] Purchase reduces cash; sale adds entered net proceeds; separately recorded fees reduce cash. Expired/canceled/rejected events do not free inventory cost. Partial sale releases proportional cost basis; final unit absorbs residual copper. Manual balance adjustments require a note and never silently reset history.
-- [ ] Enforce shopping commitments plus existing inventory against item exposure/quantity and strategy allocations; enforce new spending against cash less reserve. Deduplicate auction identity across both rankings and destinations. Revalidate selections after settings/refresh changes and before recording a purchase.
-- [ ] Test partial sales, explicit fees, correction rollback, overselling, allocation exhaustion, reserve, held exposure, stale selections and concurrent duplicate requests. Commit portfolio.
+- [x] Run `python -m pytest tests/test_portfolio.py -q` and confirm failure.
+- [x] Store append-only purchase, partial-sale, fee, rejection, expiration, cancellation, balance-adjustment and correction events. Request IDs have a unique constraint; reusing an ID for different payloads is an error. Corrections reverse/replay a consistent event chain and reject negative inventory or invalid dependent sales.
+- [x] Purchase reduces cash; sale adds entered net proceeds; separately recorded fees reduce cash. Expired/canceled/rejected events do not free inventory cost. Partial sale releases proportional cost basis; final unit absorbs residual copper. Manual balance adjustments require a note and never silently reset history.
+- [x] Enforce shopping commitments plus existing inventory against item exposure/quantity and strategy allocations; enforce new spending against cash less reserve. Deduplicate auction identity across both rankings and destinations. Revalidate selections after settings/refresh changes and before recording a purchase.
+- [x] Test partial sales, explicit fees, correction rollback, overselling, allocation exhaustion, reserve, held exposure, stale selections and concurrent duplicate requests. Commit portfolio.
 
 ### Task 5: Complete local browser workflow and export
 
@@ -174,7 +174,7 @@ def test_duplicate_purchase_is_idempotent(portfolio, purchase_event):
 
 **Interfaces:** `create_app(data_dir: Path, testing: bool = False) -> Flask`; JSON routes for settings, realms, refresh/status, results, shopping and ledger; CSV export uses the same filter/ranking query as visible results.
 
-- [ ] Write failing integration tests:
+- [x] Write failing integration tests:
 
 ```python
 def test_external_origin_cannot_mutate(client):
@@ -183,23 +183,23 @@ def test_external_origin_cannot_mutate(client):
     assert response.status_code == 403
 ```
 
-- [ ] Run `python -m pytest tests/test_web.py -q` and confirm failure.
-- [ ] Implement loopback binding, allowlisted Host headers, same-origin checks, per-session CSRF tokens, no wildcard CORS and no debug mode. Settings API never returns credentials; only configuration status. Validate payload size and fields; return sanitized errors.
-- [ ] Build responsive navigation for Opportunities, Shopping, Ledger and Settings. Show both rankings, search, sortable columns, expandable destination comparison, source age/provenance, inspection exclusions, source progress and errors. Include all specified financial/demand columns and explicit manual-verification language.
-- [ ] Add editable buy/sell realm membership selection, budget/filter settings, shopping strategy/destination, purchase/sale/fee/adjustment/correction forms, and clear inventory status. Buttons report in-flight and error state without losing entered data.
-- [ ] Render external text with textContent or template escaping. Export only visible filtered results with timestamps, assumptions and risks. Prefix spreadsheet formula-leading textual cells; retain genuine numeric columns as numbers.
-- [ ] Provide an opt-in synthetic demo using an isolated data directory, prominent OFFLINE labels and no mixing into live capital/ledger. Provide explicit user-file CSV/auction JSON import with source-time entry; missing age remains excluded.
-- [ ] Test no secret leakage, bad origins/hosts, script-bearing item names, formula injection, invalid settings and export consistency. Run browser workflows: configure, refresh/demo, filter, compare, select, buy, partially sell, correct, export, restart and confirm persistence. Commit interface.
+- [x] Run `python -m pytest tests/test_web.py -q` and confirm failure.
+- [x] Implement loopback binding, allowlisted Host headers, same-origin checks, per-session CSRF tokens, no wildcard CORS and no debug mode. Settings API never returns credentials; only configuration status. Validate payload size and fields; return sanitized errors.
+- [x] Build responsive navigation for Opportunities, Shopping, Ledger and Settings. Show both rankings, search, sortable columns, expandable destination comparison, source age/provenance, inspection exclusions, source progress and errors. Include all specified financial/demand columns and explicit manual-verification language.
+- [x] Add editable buy/sell realm membership selection, budget/filter settings, shopping strategy/destination, purchase/sale/fee/adjustment/correction forms, and clear inventory status. Buttons report in-flight and error state without losing entered data.
+- [x] Render external text with textContent or template escaping. Export only visible filtered results with timestamps, assumptions and risks. Prefix spreadsheet formula-leading textual cells; retain genuine numeric columns as numbers.
+- [x] Provide an opt-in synthetic demo using an isolated data directory, prominent OFFLINE labels and no mixing into live capital/ledger. Provide explicit user-file CSV/auction JSON import with source-time entry; missing age remains excluded.
+- [x] Test no secret leakage, bad origins/hosts, script-bearing item names, formula injection, invalid settings and export consistency. Run browser workflows: configure, refresh/demo, filter, compare, select, buy, partially sell, correct, export, restart and confirm persistence. Commit interface.
 
 ### Task 6: Live validation, documentation and GitHub delivery
 
 **Files:** README.md, .env.example, scripts/smoke_live.py, .github/workflows/tests.yml; validation report under docs.
 
-- [ ] Implement opt-in smoke script that downloads TSM, discovers configured realms, fetches an authenticated auction snapshot, prints sanitized source/row counts and runs the pipeline. Zero qualifying results is valid; invented results are not.
-- [ ] Document venv install/run commands, environment credential setup, supported categories, freshness, assumed transfer eligibility, budget semantics, CSV export, imports/demo isolation and outcome correction. Include the requirement for in-game verification.
-- [ ] Add CI running `python -m pytest -q` on Python 3.11 and a current supported Python release. Build/install the package in a clean environment and verify the CLI launches.
-- [ ] Run the complete suite, browser workflow and actual TSM parse. Run Blizzard smoke when credentials are locally configured; otherwise report that precise unverified acceptance item and provide the executable command for the user. Do not ask the user to paste secrets into chat.
-- [ ] Review diff for defects and secret/runtime data; fix findings and rerun affected tests. Record completed checks and remaining live/in-game validation separately.
+- [x] Implement opt-in smoke script that downloads TSM, discovers configured realms, fetches an authenticated auction snapshot, prints sanitized source/row counts and runs the pipeline. Zero qualifying results is valid; invented results are not.
+- [x] Document venv install/run commands, environment credential setup, supported categories, freshness, assumed transfer eligibility, budget semantics, CSV export, imports/demo isolation and outcome correction. Include the requirement for in-game verification.
+- [x] Add CI running `python -m pytest -q` on Python 3.11 and a current supported Python release. Build/install the package in a clean environment and verify the CLI launches.
+- [x] Run the complete suite, browser workflow and actual TSM parse. Run Blizzard smoke when credentials are locally configured; otherwise report that precise unverified acceptance item and provide the executable command for the user. Do not ask the user to paste secrets into chat.
+- [x] Review diff for defects and secret/runtime data; fix findings and rerun affected tests. Record completed checks and remaining live/in-game validation separately.
 - [ ] Configure origin to the verified repository, inspect remote state again, commit intended source files and push a normal non-force branch update. If the remote has acquired content, fetch and reconcile without overwriting it. Use a feature branch/PR when integration requires review; otherwise publish initial implementation to the empty repository's main branch.
 - [ ] Verify remote commit SHA and provide repository link, commit ID, local run command and material limitations. No completion claim until publication is confirmed.
 
@@ -209,4 +209,4 @@ All design sections map to the six tasks: adapters/storage (1–2), matching/val
 
 ## Execution review
 
-Recommended: native execution in this chat, keeping implementation and cross-module interfaces in one context. Subagent-driven execution is also available if explicitly selected. Review this plan before implementation as required by the installed planning workflow.
+The user approved subagent-driven execution. All six implementation tasks and their reviews are complete, including a whole-branch review and scoped fixes. Live Blizzard verification is deferred by user choice, with credential setup and smoke commands documented. Final publication/remote verification remain the delivery steps below.

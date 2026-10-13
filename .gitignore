@@ -13,3 +13,5 @@ runtime/
 cache/
 settings.json
 outcomes*.json
+
+.playwright-mcp/
