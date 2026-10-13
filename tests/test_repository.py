@@ -35,3 +35,32 @@ def test_settings_roundtrip(tmp_path):
     settings=Settings.from_dict({'buying_realms':['agamaggan'],'selling_realms':[]})
     repo.save_settings(settings)
     assert Repository(tmp_path).load_settings()==settings
+
+@pytest.mark.parametrize('field,value',[('avg_sale_price',-1),('market_value',True),('historical',-1),('sale_rate','NaN'),('sold_per_day','Infinity'),('name',' '),('updated_at',datetime(2020,1,1))])
+def test_invalid_valuation_preserves_success(tmp_path,field,value):
+    from decimal import Decimal
+    from wowflipper.models import Valuation
+    repo=Repository(tmp_path); now=datetime.now(timezone.utc)
+    valuation=Valuation(2,'fixture',10,Decimal('.1'),Decimal('1'),10,10,now)
+    snapshot=Snapshot('tsm:us',now,now,None,'tsm',(valuation,))
+    identity=repo.publish(snapshot)
+    with pytest.raises(ValueError): repo.publish(replace(snapshot,records=(replace(valuation,**{field:value}),)))
+    assert repo.latest('tsm:us').id==identity
+
+def test_cleanup_failure_does_not_fail_publication(tmp_path,monkeypatch):
+    repo=Repository(tmp_path)
+    def fail(): raise OSError('fixture')
+    monkeypatch.setattr(repo,'cleanup',fail)
+    identity=repo.publish(Snapshot('x',None,datetime.now(timezone.utc),None,'blizzard',()))
+    assert repo.latest('x').id==identity
+    assert repo.maintenance_warning=='OSError'
+
+
+def test_cache_ttl_expiry(tmp_path,monkeypatch):
+    import wowflipper.repository as module
+    now=[100]
+    monkeypatch.setattr(module.time,'time',lambda:now[0])
+    repo=Repository(tmp_path); repo.cache_timed('fixture',{'id':1})
+    assert repo.cache_fresh('fixture',86400)=={'id':1}
+    now[0]+=86400
+    assert repo.cache_fresh('fixture',86400) is None

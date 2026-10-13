@@ -4,8 +4,10 @@ import json, threading
 from concurrent.futures import ThreadPoolExecutor
 
 class RefreshService:
-    def __init__(self,repository,client):
+    def __init__(self,repository,client,tsm_client=None):
+        from .sources.tsm import TSMClient
         self.repository=repository; self.client=client
+        self.tsm_client=tsm_client or TSMClient()
         self._lock=threading.Lock(); self._worker=ThreadPoolExecutor(max_workers=1)
         self.status={'running':False,'sources':{}}
     def start(self,settings):
@@ -19,13 +21,31 @@ class RefreshService:
     def _run(self,settings):
         try:
             self.repository.save_settings(settings)
-            realms=self.repository.cache_get('realms')
-            if realms is None:
-                realms=self.client.realms(); self.repository.cache_put('realms',realms)
-            selected=set(settings.buying_realms)|set(settings.selling_realms)
-            mapping={r['slug']:r['house_id'] for r in realms}
-            unknown=selected-set(mapping)
-            if unknown: raise ValueError('Selected realm was not discovered')
+            try:
+                snapshot=self.tsm_client.region(self.repository.latest('tsm:us'))
+                identity=self.repository.publish(snapshot)
+                self.status['sources']['tsm:us']={'state':'success','snapshot_id':identity}
+                if self.repository.maintenance_warning: self.status['sources']['tsm:us']['maintenance_warning']=self.repository.maintenance_warning
+            except Exception as exc:
+                self.status['sources']['tsm:us']={'state':'failed','error':type(exc).__name__}
+            try:
+                realms=self.repository.cache_fresh('realms',86400)
+                if realms is None:
+                    realms=self.client.realms(); self.repository.cache_put('realms',realms); self.repository.cache_timed('realms',realms)
+                selected=set(settings.buying_realms)|set(settings.selling_realms)
+                mapping={r['slug']:r['house_id'] for r in realms}
+                if selected-set(mapping): raise ValueError('Selected realm was not discovered')
+                self.status['sources']['realms:us']={'state':'success'}
+            except Exception as exc:
+                self.status['sources']['realms:us']={'state':'failed','error':type(exc).__name__}
+                return self.status
+            toys={'items':[],'pending':None}
+            if 'toy' in settings.categories and hasattr(self.client,'toy_items'):
+                try:
+                    toys=self.client.toy_items(self.repository)
+                    self.status['sources']['toys:us']={'state':'pending' if toys['pending'] else 'success','pending':toys['pending']}
+                except Exception as exc:
+                    self.status['sources']['toys:us']={'state':'failed','error':type(exc).__name__}
             tsm=self.repository.latest('tsm:us')
             # Fetch metadata only for priced, discounted plausible candidates.
             values={r.item_id:r for r in tsm.records} if tsm else {}
@@ -36,17 +56,19 @@ class RefreshService:
                     for auction in snapshot.records:
                         valuation=values.get(auction.item_id); metadata=None
                         if valuation and auction.buyout <= int(valuation.avg_sale_price*auction.quantity*(1-settings.discount)):
-                            cache_key=f'item:us:{auction.item_id}'; metadata=self.repository.cache_get(cache_key)
+                            cache_key=f'item:us:{auction.item_id}'; metadata=self.repository.cache_fresh(cache_key,7*86400)
                             if metadata is None:
                                 if enriched<100:
-                                    metadata=self.client.item(auction.item_id); self.repository.cache_put(cache_key,metadata); enriched+=1
+                                    metadata=self.client.item(auction.item_id); self.repository.cache_put(cache_key,metadata); self.repository.cache_timed(cache_key,metadata); enriched+=1
                                 else: skipped+=1
+                        if metadata is not None and auction.item_id in toys['items']: metadata={**metadata,'category':'toy'}
                         variants=json.loads(auction.variant_key) if auction.variant_key else {}
                         simple=all(k in {'context','bonus_lists','modifiers'} and v in (0,[],None) for k,v in variants.items())
                         metadata={**(metadata or {}),'simple_identity':simple,'tradeability':(metadata or {}).get('tradeability')}
                         records.append(replace(auction,metadata=metadata,category=metadata.get('category','unknown')))
                     identity=self.repository.publish(replace(snapshot,records=tuple(records)))
                     self.status['sources'][key]={'state':'success','snapshot_id':identity,'metadata_fetched':enriched,'metadata_skipped':skipped}
+                    if self.repository.maintenance_warning: self.status['sources'][key]['maintenance_warning']=self.repository.maintenance_warning
                 except Exception as exc:
                     # Never expose upstream response bodies, headers or credentials.
                     self.status['sources'][key]={'state':'failed','error':type(exc).__name__}

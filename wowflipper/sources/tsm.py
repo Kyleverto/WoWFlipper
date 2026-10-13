@@ -46,3 +46,30 @@ def parse_region_report(text: str) -> ParseReport:
 
 def parse_region(text: str) -> list[Valuation]:
     return parse_region_report(text).records
+
+
+class TSMClient:
+    """Official public retail regional CSV; scan time comes from updatedAt."""
+    URL='https://public-data.tradeskillmaster.com/retail/us/region/items.csv'
+    def __init__(self,http=None):
+        from .http import HTTPClient
+        self.http=http or HTTPClient()
+    def region(self,previous=None):
+        from datetime import datetime, timezone
+        from dataclasses import replace
+        from ..models import Snapshot
+        from .http import SourceError
+        headers={'If-Modified-Since':previous.http_last_modified} if previous and previous.http_last_modified else {}
+        response=self.http.request('GET',self.URL,headers)
+        now=datetime.now(timezone.utc)
+        if response.status==304:
+            if previous is None: raise ValueError('304 without prior TSM snapshot')
+            return replace(previous,fetched_at=now)
+        if response.status!=200: raise SourceError(f'TSM request failed ({response.status})')
+        try: report=parse_region_report(response.body.decode('utf-8-sig'))
+        except UnicodeError: raise ValueError('Invalid TSM text encoding') from None
+        if report.rejected_rows or not report.records: raise ValueError('Invalid TSM regional rows')
+        times={record.updated_at for record in report.records}
+        if len(times)!=1: raise ValueError('Inconsistent TSM scan timestamps')
+        modified=next((v for k,v in response.headers.items() if k.lower()=='last-modified'),None)
+        return Snapshot('tsm:us',next(iter(times)),now,modified,'tsm',tuple(report.records),raw_payload=response.body)

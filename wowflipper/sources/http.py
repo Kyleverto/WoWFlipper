@@ -36,7 +36,7 @@ class HTTPClient:
 
     def request(self,method,url,headers=None,body=None):
         parsed=urlsplit(url)
-        if parsed.scheme!='https' or parsed.hostname not in {'us.api.blizzard.com','oauth.battle.net'} or parsed.port not in {None,443} or parsed.username or parsed.password:
+        if parsed.scheme!='https' or parsed.hostname not in {'us.api.blizzard.com','oauth.battle.net','public-data.tradeskillmaster.com'} or parsed.port not in {None,443} or parsed.username or parsed.password:
             raise ValueError('Upstream URL is not allowed')
         for attempt in range(3):
             try:

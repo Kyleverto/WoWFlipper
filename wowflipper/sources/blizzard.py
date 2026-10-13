@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from email.utils import parsedate_to_datetime
 from .http import HTTPClient, SourceError
-from ..models import Snapshot, normalize_auction
+from ..models import Snapshot, normalize_auction, integer
 
 class BlizzardClient:
     def __init__(self,http=None,client_id=None,client_secret=None,clock=time.time):
@@ -78,6 +78,31 @@ class BlizzardClient:
         records=[]
         for entry in data['auctions']:
             if not isinstance(entry,dict) or not isinstance(entry.get('item'),dict): raise ValueError('Invalid auction record')
+            try:
+                integer(entry['id'],1); integer(entry['item']['id'],1); integer(entry['quantity'],1)
+                buyout=integer(entry.get('buyout',0))
+                if buyout==0:
+                    integer(entry['bid'],1)
+                    continue
+            except (KeyError,ValueError,TypeError): raise ValueError('Invalid auction record') from None
             record=normalize_auction(entry,house_id,'us')
+            if record is None: raise ValueError('Invalid auction record')
             if record is not None: records.append(replace(record,source_time=source_time))
         return Snapshot(f'auctions:us:{house_id}',source_time,now,modified,'blizzard',tuple(records),raw_payload=response.body)
+
+    def toy_items(self,repository,limit=50):
+        """Incrementally resolve toy IDs through their item links, never equate IDs."""
+        state=repository.cache_fresh('toys:us',7*86400)
+        if state is None:
+            data=self._json(self._get('/data/wow/toy/index',static=True))
+            if not isinstance(data.get('toys'),list): raise ValueError('Invalid toy index')
+            state={'items':[],'remaining':[integer(toy['id'],1) for toy in data['toys']]}
+            repository.cache_timed('toys:us',state)
+        for toy_id in state['remaining'][:limit]:
+            data=self._json(self._get(f'/data/wow/toy/{toy_id}',static=True))
+            try: item_id=integer(data['item']['id'],1)
+            except (KeyError,TypeError,ValueError): raise ValueError('Invalid toy item link') from None
+            state['items']=sorted(set(state['items'])|{item_id})
+            state['remaining'].remove(toy_id)
+            repository.cache_timed('toys:us',state)
+        return {'items':state['items'],'pending':len(state['remaining'])}

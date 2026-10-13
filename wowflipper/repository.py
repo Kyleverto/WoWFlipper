@@ -1,10 +1,10 @@
 """Transactional normalized snapshots and atomically published raw payloads."""
-import sqlite3, json, hashlib, os, tempfile, threading
+import sqlite3, json, hashlib, os, tempfile, threading, time
 from pathlib import Path
 from dataclasses import asdict, replace
 from datetime import datetime
 from decimal import Decimal
-from .models import Snapshot, Auction, Valuation, integer, timestamp
+from .models import Snapshot, Auction, Valuation, integer, timestamp, decimal
 from .settings import Settings
 
 def encode(value):
@@ -14,6 +14,7 @@ def encode(value):
 class Repository:
     def __init__(self,path):
         self._publish_lock=threading.Lock()
+        self.maintenance_warning=None
         self.path=Path(path); self.path.mkdir(parents=True,exist_ok=True)
         self.payloads=self.path/'payloads'; self.payloads.mkdir(exist_ok=True)
         with self.connect() as db:
@@ -30,6 +31,11 @@ class Repository:
             if isinstance(record,Auction):
                 for value in (record.auction_id,record.house_id,record.quantity,record.buyout): integer(value,1)
                 if record.region!='us': raise ValueError('Unsupported region')
+            else:
+                for value in (record.avg_sale_price,record.market_value,record.historical): integer(value)
+                decimal(record.sale_rate,1); decimal(record.sold_per_day)
+                if not isinstance(record.name,str) or not record.name.strip(): raise ValueError('Invalid valuation name')
+                timestamp(record.updated_at)
         if snapshot.records and any(type(r)!=type(snapshot.records[0]) for r in snapshot.records): raise ValueError('Mixed records')
         data=asdict(snapshot); data.pop('raw_payload'); data.pop('id')
         data['record_type']='auction' if snapshot.records and isinstance(snapshot.records[0],Auction) else 'valuation'
@@ -49,7 +55,9 @@ class Repository:
             compact={k:v for k,v in data.items() if k!='records'}
             db.execute('INSERT INTO provenance VALUES(?,?,?)',(identity,snapshot.source_key,json.dumps(compact,default=encode)))
             db.execute('DELETE FROM snapshots WHERE source=? AND id NOT IN (SELECT id FROM snapshots WHERE source=? ORDER BY id DESC LIMIT 2)',(snapshot.source_key,snapshot.source_key))
-        self.cleanup()
+        self.maintenance_warning=None
+        try: self.cleanup()
+        except (OSError,sqlite3.Error) as exc: self.maintenance_warning=type(exc).__name__
         return identity
     def cleanup(self):
         with self.connect() as db: referenced={r[0] for r in db.execute('SELECT payload FROM snapshots')}
@@ -78,3 +86,10 @@ class Repository:
         with self.connect() as db: db.execute('INSERT OR REPLACE INTO cache VALUES(?,?)',(key,json.dumps(value,default=encode)))
     def save_settings(self,settings): self.cache_put('settings',settings.to_dict())
     def load_settings(self): return Settings.from_dict(self.cache_get('settings') or {})
+
+    def cache_fresh(self,key,max_age_seconds):
+        entry=self.cache_get('timed:'+key)
+        if not isinstance(entry,dict) or time.time()-entry.get('cached_at',0)>=max_age_seconds: return None
+        return entry['value']
+    def cache_timed(self,key,value):
+        self.cache_put('timed:'+key,{'cached_at':time.time(),'value':value})
