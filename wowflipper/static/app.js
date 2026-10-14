@@ -6,6 +6,7 @@ let state,
   csrf,
   currentTab = "opportunities";
 const shoppingRows = new Map();
+const shoppingGroups = new Map();
 let shoppingSequence = 0;
 let resultsSequence = 0;
 let resultsRequest = null;
@@ -218,6 +219,7 @@ async function loadState(initial = false) {
   else if (currentTab === "settings") { renderRealmSelection(true); renderResaleOverrides(); }
   populateDestinations();
   for (const controller of shoppingRows.values()) controller.updateSource();
+  renderShoppingGroups();
 }
 function renderCapital() {
   const container = $("capital");
@@ -576,6 +578,52 @@ function renderResults() {
   }
   container.append(wrap);
 }
+function buyingHouse(item) {
+  return item.candidate.auction?.house_id ?? item.key[1];
+}
+function buyingRealmNames(house) {
+  const names = (state.realms || []).filter(realm => String(realm.house_id) === String(house))
+    .map(realm => realm.name || realm.slug).filter(Boolean);
+  return [...new Set(names)].join(", ") || "Realm mapping unavailable";
+}
+function reconcileShoppingChildren(parent, ordered) {
+  const wanted = new Set(ordered);
+  for (const child of [...parent.children]) if (!wanted.has(child)) parent.removeChild(child);
+  for (const [index, child] of ordered.entries()) {
+    if (parent.children[index] !== child) parent.insertBefore(child, parent.children[index] || null);
+  }
+}
+function renderShoppingGroups() {
+  const groups = new Map();
+  for (const item of shopping) {
+    const controller = shoppingRows.get(JSON.stringify(item.key));
+    if (!controller) continue;
+    const house = buyingHouse(item), key = String(house);
+    if (!groups.has(key)) groups.set(key, {house, items: [], rows: []});
+    const group = groups.get(key);
+    group.items.push(item);
+    group.rows.push(controller.row);
+  }
+  for (const key of shoppingGroups.keys()) if (!groups.has(key)) shoppingGroups.delete(key);
+  const sections = [];
+  // House IDs give groups a stable order even when realm names or destinations change.
+  for (const [key, group] of [...groups].sort((a, b) => a[0].localeCompare(b[0], "en", {numeric: true}))) {
+    let section = shoppingGroups.get(key);
+    if (!section) {
+      const node = el("section", undefined, "shopping-group"), title = el("h3"), totals = el("p", undefined, "shopping-group-totals"), list = el("div");
+      node.append(title, totals, list);
+      section = {node, title, totals, list};
+      shoppingGroups.set(key, section);
+    }
+    section.title.textContent = `${buyingRealmNames(group.house)} • Connected auction house ${group.house}`;
+    const quantity = group.items.reduce((total, item) => total + Number(item.quantity), 0);
+    const cost = group.items.reduce((total, item) => total + Number(item.cost), 0);
+    section.totals.textContent = `${group.items.length} ${group.items.length === 1 ? "listing" : "listings"} • ${quantity} ${quantity === 1 ? "unit" : "units"} • ${gold(cost)} quoted`;
+    reconcileShoppingChildren(section.list, group.rows);
+    sections.push(section.node);
+  }
+  reconcileShoppingChildren($("shopping-items"), sections.length ? sections : [el("div", "No selected listings. Select a whole listing from Opportunities.", "empty")]);
+}
 async function loadShopping() {
   const sequence = ++shoppingSequence, generation = resaleGeneration;
   const loaded = await api("/api/shopping");
@@ -583,34 +631,19 @@ async function loadShopping() {
   shopping = loaded;
   const keys = new Set(shopping.map(item => JSON.stringify(item.key)));
   for (const key of shoppingRows.keys()) if (!keys.has(key)) shoppingRows.delete(key);
-  const container = $("shopping-items");
-  container.replaceChildren();
-  if (!shopping.length) {
-    container.append(
-      el(
-        "div",
-        "No selected listings. Select a whole listing from Opportunities.",
-        "empty",
-      ),
-    );
-    return;
-  }
   for (const item of shopping) {
     const rowKey = JSON.stringify(item.key);
     const existing = shoppingRows.get(rowKey);
     if (existing) {
       existing.update(item);
-      container.append(existing.row);
       continue;
     }
     const row = el("div", undefined, "shopping-row"),
       info = el("div");
-    const sourceHouse = item.candidate.auction?.house_id ?? item.key[1];
     const source = el("p");
     function updateSource() {
-      const names = (state.realms || []).filter(realm => realm.house_id === sourceHouse)
-        .map(realm => realm.name || realm.slug);
-      source.textContent = `Buy on: ${names.length ? names.join(", ") : "Realm mapping unavailable"} • Connected auction house ${sourceHouse}`;
+      const sourceHouse = buyingHouse(item);
+      source.textContent = `Buy on: ${buyingRealmNames(sourceHouse)} • Connected auction house ${sourceHouse}`;
     }
     updateSource();
     const eligibility = el("p", item.valid ? "Currently eligible; manually verify in game" : item.validation_error, "caution");
@@ -729,7 +762,6 @@ async function loadShopping() {
       resaleStale = true;
       updateDestination();
     }, update(current) {
-      updateSource();
       const choice = destination.select.value;
       const refreshed = destinationControl(choice, item.candidate.valuation.name);
       destination.select.replaceChildren(...refreshed.select.options);
@@ -739,12 +771,13 @@ async function loadShopping() {
         resaleStale = false;
         eligibility.textContent = item.valid ? "Currently eligible; manually verify in game" : item.validation_error;
       }
+      updateSource();
       updateDestination();
     }};
     shoppingRows.set(rowKey, controller);
     row.append(info, destinationActions, status, form, remove);
-    container.append(row);
   }
+  renderShoppingGroups();
 }
 function renderLedger() {
   const inventory = state.summary.inventory;

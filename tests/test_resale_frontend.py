@@ -51,7 +51,7 @@ const saving=button(details,'Save override').onclick();assert.equal(input.disabl
 def test_saved_override_blocks_unconfirmed_shopping_eligibility_without_losing_paid_draft():
     run_behavior(r'''
 context.items=[{key:['us',1,2],candidate:row,cost:10000,quantity:1,destination:'home',valid:true}];const loading=vm.runInContext('loadShopping()',context);requests[0].resolve(context.items);await loading;
-const current=node('shopping-items').children[0],paid=controls(current,'input')[0];paid.value='9.8765';vm.runInContext('loadResults=async()=>{}',context);
+const current=shoppingNodes()[0],paid=controls(current,'input')[0];paid.value='9.8765';vm.runInContext('loadResults=async()=>{}',context);
 const saving=vm.runInContext('saveResaleOverride(7,"2")',context);requests[1].resolve({});await flush();assert.equal(button(current,'Record purchase').disabled,true);requests[2].reject(Error('offline'));await assert.rejects(saving);assert.equal(paid.value,'9.8765');assert.equal(button(current,'Record purchase').disabled,true);
 const retry=vm.runInContext('loadShopping()',context);requests[3].resolve(context.items);await retry;assert.equal(paid.value,'9.8765');assert.equal(button(current,'Record purchase').disabled,false);
 ''')
@@ -66,7 +66,7 @@ context.items=[row];vm.runInContext('rows=items;renderResults()',context);const 
 def test_override_pending_and_lost_response_block_old_shopping_eligibility():
     run_behavior(r'''
 context.items=[{key:['us',1,2],candidate:row,cost:10000,quantity:1,destination:'home',valid:true}];let loading=vm.runInContext('loadShopping()',context);requests[0].resolve(context.items);await loading;
-const current=node('shopping-items').children[0],paid=controls(current,'input')[0];paid.value='9.8765';context.rowsFixture=[row];vm.runInContext('rows=rowsFixture;renderResults()',context);
+const current=shoppingNodes()[0],paid=controls(current,'input')[0];paid.value='9.8765';context.rowsFixture=[row];vm.runInContext('rows=rowsFixture;renderResults()',context);
 const before=vm.runInContext('loadShopping()',context),saving=vm.runInContext('saveResaleOverride(7,"2")',context);assert.equal(button(current,'Record purchase').disabled,true);assert.equal(vm.runInContext('rows.length',context),0);
 const during=vm.runInContext('loadShopping()',context);requests[3].resolve(context.items);await during;assert.equal(button(current,'Record purchase').disabled,true);
 requests[2].reject(Error('response lost after commit'));await assert.rejects(saving);requests[1].resolve(context.items);await before;assert.equal(button(current,'Record purchase').disabled,true);assert.equal(paid.value,'9.8765');
@@ -77,7 +77,7 @@ loading=vm.runInContext('loadShopping()',context);requests[4].resolve([{...conte
 def test_destination_eligibility_response_from_before_override_cannot_unlock():
     run_behavior(r'''
 context.items=[{key:['us',1,2],candidate:row,cost:10000,quantity:1,destination:'home',valid:true}];let loading=vm.runInContext('loadShopping()',context);requests[0].resolve(context.items);await loading;
-const current=node('shopping-items').children[0],select=controls(current,'select')[0];select.value='away';select.onchange();const destSaving=button(current,'Save destination').onclick();requests[1].resolve({...context.items[0],destination:'away'});await flush();
+const current=shoppingNodes()[0],select=controls(current,'select')[0];select.value='away';select.onchange();const destSaving=button(current,'Save destination').onclick();requests[1].resolve({...context.items[0],destination:'away'});await flush();
 const override=vm.runInContext('saveResaleOverride(7,"2")',context);assert.equal(button(current,'Record purchase').disabled,true);requests[3].fail({error:'Known rejection'});await assert.rejects(override);requests[2].resolve([{...context.items[0],destination:'away',valid:true}]);await destSaving;assert.equal(button(current,'Record purchase').disabled,true);
 loading=vm.runInContext('loadShopping()',context);requests[4].resolve([{...context.items[0],destination:'away',valid:true}]);await loading;assert.equal(button(current,'Record purchase').disabled,true);const confirm=button(current,'Save destination').onclick();requests[5].resolve({...context.items[0],destination:'away'});await flush();requests[6].resolve([{...context.items[0],destination:'away',valid:true}]);await confirm;assert.equal(button(current,'Record purchase').disabled,false);
 ''')

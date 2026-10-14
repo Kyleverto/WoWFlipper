@@ -52,8 +52,10 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
 const elements=new Map();
 class Node {
  constructor(tag='div',text=''){this.tag=tag;this.textContent=text;this.children=[];this.value='';this.attrs={};this.options=this.children;}
- append(...nodes){this.children.push(...nodes)}
- replaceChildren(...nodes){this.children.splice(0,this.children.length,...nodes)}
+ append(...nodes){for(const n of nodes){if(n.parentNode)n.parentNode.removeChild(n);this.children.push(n);n.parentNode=this}}
+ removeChild(n){const i=this.children.indexOf(n);if(i<0)throw Error('not a child');this.children.splice(i,1);n.parentNode=null;return n}
+ insertBefore(n,before){if(n.parentNode)n.parentNode.removeChild(n);const i=before===null?this.children.length:this.children.indexOf(before);if(i<0)throw Error('reference is not a child');this.children.splice(i,0,n);n.parentNode=this;return n}
+ replaceChildren(...nodes){for(const n of [...this.children])this.removeChild(n);this.append(...nodes)}
  setAttribute(k,v){this.attrs[k]=v}
  querySelectorAll(selector){const found=[];function visit(n){for(const child of n.children||[]){if(selector.split(',').includes(child.tag))found.push(child);visit(child)}}visit(this);return found}
 }
@@ -62,7 +64,7 @@ const context={console,document:{getElementById:node,createElement:tag=>new Node
 vm.createContext(context);
 const source=fs.readFileSync('wowflipper/static/app.js','utf8');
 vm.runInContext(source.slice(0,source.indexOf('async function loadState(')),context);
-vm.runInContext(source.slice(source.indexOf('async function loadShopping('),source.indexOf('function field(')),context);
+vm.runInContext(source.slice(source.indexOf('function buyingHouse('),source.indexOf('function field(')),context);
 vm.runInContext(source.slice(source.indexOf('function field('),source.indexOf('function renderSettings(')),context);
 vm.runInContext(source.slice(source.indexOf('function renderCorrection('),source.indexOf('$("event-form").onsubmit')),context);
 const candidate={valuation:{name:'Legacy item'}};
@@ -85,7 +87,7 @@ context.items=[{...purchase,key:['us',1,2],valid:true}];context.api=async()=>con
 vm.runInContext('loadShopping()',context).then(()=>{
 assert.ok(text(node('shopping-items')).includes('Legacy item'));
 assert.ok(!text(node('shopping-items')).includes('longer-term'));
-assert.ok(node('shopping-items').children[0].children.some(n=>n.tag==='form'));
+assert.ok(node('shopping-items').querySelectorAll('form').length===1);
 }).catch(error=>{console.error(error);process.exitCode=1});
 '''
     subprocess.run(['node', '-e', script], check=True, cwd=Path(__file__).resolve().parents[1])

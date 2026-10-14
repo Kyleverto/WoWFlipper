@@ -70,6 +70,8 @@ Do not claim simple identity for ambiguous bonus lists, modifiers or pet fields:
 
 ## Shopping and outcomes
 
+Shopping list groups selected listings by their buying connected auction house, ordered by house ID, with sibling realm names and listing, unit, and quoted cost totals. Each listing keeps its own destination and purchase controls.
+
 Shopping shows “Buy on” with every discovered realm sharing the listing’s source auction house and its connected auction house ID, separately from the saved selling destination. When realm mapping is unavailable, the source house ID remains visible.
 
 Selecting a row creates a plan, not a purchase. Record a purchase only after buying manually; enter actual whole-listing cost, which is rechecked against budgets while preserving the quoted snapshot. Sales use actual **net proceeds received**, after auction cut, rather than gross sale price. Record extra fees separately only when not already included in net proceeds; do not deduct the cut twice. Partial sales allocate lot cost proportionally, with the remainder reconciled on the final sale. Expiration, cancellation and rejection do not remove held inventory; record any actual unrecovered fees separately.
