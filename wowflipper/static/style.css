@@ -2,6 +2,6 @@
 
 button.sort-button{padding:0;background:transparent;border:0;color:var(--nav);font-weight:700;white-space:nowrap;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:4px}
 
-.row-actions{margin-top:10px;display:flex;gap:6px}.row-actions button{font-size:12px;padding:6px 8px;white-space:nowrap}
+.row-actions{margin-top:10px;display:flex;align-items:center;flex-wrap:wrap;gap:6px}.row-actions button{font-size:12px;padding:6px 8px;white-space:nowrap}
 
 #realm-membership{max-height:420px;overflow:auto;border:1px solid var(--line);padding:8px}.realm-row{flex-wrap:wrap}.realm-row>span{flex:1;min-width:220px}.legacy-realm{width:100%;color:var(--caution)}#results-status{min-height:1.5em}#export[aria-disabled="true"]{opacity:.5;pointer-events:none}

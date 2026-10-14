@@ -484,22 +484,18 @@ function renderResults() {
     const selectionKey = "select:" + row.key.join(":");
     const unconfirmedSelection = pending.get(selectionKey);
     let destination = unconfirmedSelection ? JSON.parse(unconfirmedSelection.fingerprint)[1].destination : $("destination").value, selecting = false;
-    const rowDestination = destinationControl(destination, v.name);
     const compareDestination = destinationControl(destination, v.name + " comparison");
     const compareSelect = el("button", "Select listing");
     function updateSelection() {
-      for (const picker of [rowDestination.select, compareDestination.select]) {
-        picker.value = destination;
-        picker.disabled = selecting || pending.has(selectionKey) || !state.settings.selling_realms.length;
-      }
+      compareDestination.select.value = destination;
+      compareDestination.select.disabled = selecting || pending.has(selectionKey) || !state.settings.selling_realms.length;
       for (const button of [select, compareSelect]) {
         button.disabled = selecting || (!configuredDestination(destination) && !pending.has(selectionKey));
         button.title = button.disabled ? "Choose a configured selling realm in Settings" : "Reserve this whole listing";
       }
     }
-    for (const picker of [rowDestination.select, compareDestination.select])
-      picker.onchange = () => { destination = picker.value; updateSelection(); };
-    controls.append(inspect, rowDestination.label, select);
+    compareDestination.select.onchange = () => { destination = compareDestination.select.value; updateSelection(); };
+    controls.append(inspect, select);
     updateSelection();
     body.append(tr);
     const details = el("tr", undefined, "details");

@@ -27,14 +27,17 @@ def run_behavior(script):
 
 pytestmark=pytest.mark.skipif(shutil.which('node') is None,reason='Node is required for frontend behavior tests')
 
-def test_opportunity_destination_is_local_and_comparison_controls_stay_synced():
+def test_opportunity_destination_is_local_and_compare_choice_is_shared_with_main_action():
     run_behavior(r'''
 context.items=[row,{...row,key:['us',1,3]}];vm.runInContext('rows=items;renderResults()',context);
-const tableRows=controls(node('results'),'tr'),first=tableRows[1],details=tableRows[2],second=tableRows[3],rowSelect=controls(first,'select')[0];
-assert.ok(rowSelect,'Each opportunity needs a destination selector');assert.equal(rowSelect.value,'home');assert.equal(controls(second,'select')[0].value,'home');
-rowSelect.value='away';rowSelect.onchange();assert.equal(node('destination').value,'home');assert.equal(controls(second,'select')[0].value,'home');
-const comparisonSelect=controls(details,'select')[0];assert.equal(comparisonSelect.value,'away');comparisonSelect.value='home';comparisonSelect.onchange();assert.equal(rowSelect.value,'home');rowSelect.value='away';rowSelect.onchange();vm.runInContext('loadShopping=async()=>{}',context);
-const selection=button(details,'Select listing').onclick();assert.equal(requests[0].path,'/api/shopping');assert.equal(requests[0].payload.destination,'away');requests[0].resolve({});await selection;
+const tableRows=controls(node('results'),'tr'),first=tableRows[1],details=tableRows[2],second=tableRows[3],secondDetails=tableRows[4];
+assert.equal(controls(first,'select').length,0);assert.equal(controls(second,'select').length,0);assert.deepEqual(controls(first,'button').map(n=>n.textContent),['Compare','Select listing']);
+assert.equal(details.hidden,true);button(first,'Compare').onclick();assert.equal(details.hidden,false);
+const picker=controls(details,'select')[0];assert.ok(picker,'Compare needs a destination selector');assert.equal(picker.value,'home');assert.equal(controls(secondDetails,'select')[0].value,'home');
+picker.value='away';picker.onchange();assert.equal(node('destination').value,'home');assert.equal(controls(secondDetails,'select')[0].value,'home');vm.runInContext('loadShopping=async()=>{}',context);
+const mainSelection=button(first,'Select listing').onclick();assert.equal(requests[0].path,'/api/shopping');assert.equal(requests[0].payload.destination,'away');requests[0].resolve({});await mainSelection;
+picker.value='home';picker.onchange();const comparisonSelection=button(details,'Select listing').onclick();assert.equal(requests[1].payload.destination,'home');requests[1].resolve({});await comparisonSelection;
+const defaultSelection=button(second,'Select listing').onclick();assert.equal(requests[2].payload.destination,'home');requests[2].resolve({});await defaultSelection;
 ''')
 
 def test_shopping_save_blocks_purchase_and_preserves_paid_draft_on_retry():
@@ -81,15 +84,15 @@ assert.equal(paid.value,'9.8765');assert.equal(select.value,'away');assert.equal
 def test_no_configured_realms_disables_opportunity_select_actions():
     run_behavior(r'''
 vm.runInContext('state.settings.selling_realms=[]',context);node('destination').value='';context.items=[row];vm.runInContext('rows=items;renderResults()',context);
-assert.equal(controls(node('results'),'select').length,2);for(const select of controls(node('results'),'select')){assert.equal(select.disabled,true);assert.ok(select.options[0].textContent.includes('Settings'));}
+assert.equal(controls(controls(node('results'),'tr')[1],'select').length,0);assert.equal(controls(node('results'),'select').length,1);for(const select of controls(node('results'),'select')){assert.equal(select.disabled,true);assert.ok(select.options[0].textContent.includes('Settings'));}
 for(const select of controls(node('results'),'button').filter(n=>n.textContent==='Select listing'))assert.equal(select.disabled,true);
 ''')
 
 
 def test_opportunity_unconfirmed_local_choice_survives_rerender():
     run_behavior(r'''
-context.items=[row];vm.runInContext('rows=items;renderResults()',context);let first=controls(node('results'),'tr')[1],picker=controls(first,'select')[0];picker.value='away';picker.onchange();const selected=button(first,'Select listing').onclick();requests[0].reject(Error('offline'));await selected;
-vm.runInContext('renderResults()',context);first=controls(node('results'),'tr')[1];picker=controls(first,'select')[0];assert.equal(picker.value,'away');vm.runInContext('loadShopping=async()=>{}',context);const retry=button(first,'Select listing').onclick();assert.equal(requests[1].payload.destination,'away');assert.equal(requests[1].payload.request_id,requests[0].payload.request_id);requests[1].resolve({});await retry;
+context.items=[row];vm.runInContext('rows=items;renderResults()',context);let first=controls(node('results'),'tr')[1],details=controls(node('results'),'tr')[2],picker=controls(details,'select')[0];assert.equal(controls(first,'select').length,0);picker.value='away';picker.onchange();const selected=button(first,'Select listing').onclick();requests[0].reject(Error('offline'));await selected;
+vm.runInContext('renderResults()',context);first=controls(node('results'),'tr')[1];details=controls(node('results'),'tr')[2];assert.equal(controls(first,'select').length,0);picker=controls(details,'select')[0];assert.equal(picker.value,'away');vm.runInContext('loadShopping=async()=>{}',context);button(first,'Compare').onclick();const retry=button(details,'Select listing').onclick();assert.equal(requests[1].payload.destination,'away');assert.equal(requests[1].payload.request_id,requests[0].payload.request_id);requests[1].resolve({});await retry;
 ''')
 
 
@@ -154,7 +157,7 @@ requests[2].resolve([{...context.items[0],destination:'home'}]);await loading;as
 def test_removed_realm_pending_retries_can_replay_or_clear_confirmed_failure():
     run_behavior(r'''
 context.items=[row];vm.runInContext('state.settings.selling_realms=["home"];pending.set("select:us:1:2",{fingerprint:JSON.stringify(["/api/shopping",{key:["us",1,2],destination:"away"}]),id:"selection-id"});rows=items;renderResults()',context);
-const first=controls(node('results'),'tr')[1],selection=button(first,'Select listing');assert.equal(selection.disabled,false);vm.runInContext('loadState=async()=>{}',context);const selecting=selection.onclick();assert.equal(requests[0].payload.destination,'away');requests[0].fail({error:'Realm unavailable'});await selecting;assert.equal(controls(first,'select')[0].disabled,false);
+const first=controls(node('results'),'tr')[1],details=controls(node('results'),'tr')[2],selection=button(details,'Select listing');assert.equal(controls(first,'select').length,0);button(first,'Compare').onclick();assert.equal(selection.disabled,false);vm.runInContext('loadState=async()=>{}',context);const selecting=selection.onclick();assert.equal(requests[0].payload.destination,'away');requests[0].fail({error:'Realm unavailable'});await selecting;assert.equal(controls(details,'select')[0].disabled,false);
 context.items=[{key:['us',1,2],candidate:row,cost:10000,quantity:1,destination:'home',valid:true}];vm.runInContext('pending.set("destination:us:1:2",{fingerprint:JSON.stringify(["/api/shopping/destination",{key:["us",1,2],destination:"away"}]),id:"destination-id"})',context);const loading=vm.runInContext('loadShopping()',context);requests[1].resolve(context.items);await loading;
 const current=node('shopping-items').children[0],save=button(current,'Save destination'),picker=controls(current,'select')[0];assert.equal(save.disabled,false);const saving=save.onclick();assert.equal(requests[2].payload.destination,'away');requests[2].fail({error:'Realm unavailable'});await saving;assert.equal(picker.disabled,false);assert.equal(button(current,'Record purchase').disabled,true);picker.value='home';picker.onchange();assert.equal(button(current,'Record purchase').disabled,false);
 ''')
