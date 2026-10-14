@@ -36,7 +36,7 @@ def test_demo_workflow_and_export(tmp_path):
     state=client.get('/api/state').json
     assert state['mode']=='offline-demo'
     rows=client.get('/api/results').json['rows']; assert rows
-    row=rows[0]
+    row=next(row for row in rows if row['auction']['quantity']>1)
     selected=post(client,'/api/shopping',{'key':row['key'],'strategy':'stronger-demand','destination':'agamaggan','request_id':'select1'})
     assert selected.status_code==200
     purchase={'event':{'type':'purchase','key':row['key'],'cost':row['auction']['buyout']},'request_id':'buy1'}
@@ -95,3 +95,18 @@ def test_export_matches_query(tmp_path):
     exported=list(csv.DictReader(io.StringIO(client.get('/api/export'+query).text)))
     assert [r['valuation']['name'] for r in rows]==[r['Item'] for r in exported]
     assert all(r['Snapshot provenance'] and r['Auction source time'] and r['Assumptions and risks'] for r in exported)
+
+
+def test_shopping_strategy_optional_and_legacy_queries_match_default(tmp_path):
+ import csv,io
+ from wowflipper.demo import seed_demo
+ seed_demo(tmp_path); client=create_app(tmp_path,testing=True).test_client()
+ rows=client.get('/api/results').json['rows']
+ assert [int(r['profit']) for r in rows]==sorted((int(r['profit']) for r in rows),reverse=True)
+ for strategy in ('stronger-demand','longer-term'):
+  assert client.get('/api/results?strategy='+strategy).json['rows']==rows
+ exported=list(csv.DictReader(io.StringIO(client.get('/api/export').text)))
+ assert [r['valuation']['name'] for r in rows]==[r['Item'] for r in exported]
+ selected=post(client,'/api/shopping',{'key':rows[0]['key'],'destination':'agamaggan','request_id':'general'})
+ assert selected.status_code==200
+ assert selected.json['strategy']=='general'

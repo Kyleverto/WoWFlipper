@@ -37,7 +37,8 @@ def test_risk_cost_budget():
 def test_rank():
  c=evaluate(A,V,S,NOW)
  d=replace(c,key=('us',1,43),auction=replace(A,auction_id=43),valuation=replace(V,sold_per_day=Decimal(3)),profit=90_000_000)
- assert rank([d,c,c],'stronger-demand')==[d,c]
+ assert rank([d,c,c],'stronger-demand')==[c,d]
+ assert rank([d,c,c])==[c,d]
  assert rank([d,c],'longer-term')==[c,d]
  assert rank([c,d],'longer-term')==rank([d,c],'longer-term')
  with pytest.raises(ValueError): rank([c],'bad')
@@ -67,3 +68,7 @@ def test_stale_valuation_excludes_actionable_candidate():
  stale=replace(V,updated_at=NOW-timedelta(hours=S.max_tsm_age_hours+1))
  assert evaluate(A,stale,S,NOW) is None
  assert 'valuation' in exclusion_reason(A,stale,S,NOW)
+
+
+def test_legacy_allocations_do_not_exclude_otherwise_affordable_listing():
+ assert evaluate(A,V,replace(S,stronger_demand_budget=0,longer_term_budget=0),NOW) is not None

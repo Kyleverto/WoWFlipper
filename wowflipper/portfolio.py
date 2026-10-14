@@ -10,7 +10,8 @@ from .repository import encode
 from .models import integer
 from .engine import evaluate
 
-STRATEGIES = {'stronger-demand': 'stronger_demand_budget', 'longer-term': 'longer_term_budget'}
+# Historical labels remain accepted for immutable event replay and corrections.
+STRATEGIES = {'general', 'stronger-demand', 'longer-term'}
 EVENT_FIELDS = {
     'purchase': {'type', 'key', 'cost', 'note'},
     'sale': {'type', 'purchase_id', 'quantity', 'net_proceeds', 'note'},
@@ -147,12 +148,11 @@ class Portfolio:
         return candidate
 
     def _limits(self, state, selections, settings):
-        costs, copies, allocations = {}, {}, {strategy: 0 for strategy in STRATEGIES}
+        costs, copies = {}, {}
         for lot in state['inventory']:
             item = lot['item_id']
             costs[item] = costs.get(item, 0) + lot['remaining_cost']
             copies[item] = copies.get(item, 0) + lot['remaining_quantity']
-            allocations[lot['strategy']] += lot['remaining_cost']
         committed = 0
         for selection in selections:
             if serialize(selection['key']) in state['purchased_keys']:
@@ -160,19 +160,16 @@ class Portfolio:
             item = selection['item_id']
             costs[item] = costs.get(item, 0) + selection['cost']
             copies[item] = copies.get(item, 0) + selection['quantity']
-            allocations[selection['strategy']] += selection['cost']
             committed += selection['cost']
         if any(value > settings.item_exposure for value in costs.values()):
             raise ValueError('Item exposure limit exhausted')
         if any(value > settings.max_copies for value in copies.values()):
             raise ValueError('Item quantity limit exhausted')
-        if any(value > getattr(settings, STRATEGIES[strategy]) for strategy, value in allocations.items()):
-            raise ValueError('Strategy allocation exhausted')
         if committed > state['cash'] - settings.reserve:
             raise ValueError('Cash reserve prevents commitment')
-        return committed, allocations
+        return committed
 
-    def select(self, candidate_key, strategy, destination, request_id):
+    def select(self, candidate_key, strategy='general', destination=None, request_id=None):
         key = auction_key(candidate_key)
         payload = {'action': 'select', 'key': key, 'strategy': strategy, 'destination': destination}
         with self.repository.connect() as db:
@@ -362,9 +359,6 @@ class Portfolio:
             state['reserve'] = settings.reserve
             state['available_cash'] = max(0, state['cash'] - settings.reserve - state['committed'])
             state['inventory_cost'] = sum(lot['remaining_cost'] for lot in state['inventory'])
-            state['allocations'] = {strategy: {'budget': getattr(settings, field),
-                'used': sum(lot['remaining_cost'] for lot in state['inventory'] if lot['strategy'] == strategy) +
-                        sum(s['cost'] for s in selected if s['strategy'] == strategy)} for strategy, field in STRATEGIES.items()}
             try:
                 check = dict(state, purchased_keys=purchased_keys)
                 self._limits(check, selected, settings)

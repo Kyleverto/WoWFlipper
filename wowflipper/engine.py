@@ -66,8 +66,7 @@ def exclusion_reason(auction, valuation, settings, now):
         return 'category_filtered'
     if auction.quantity > settings.max_copies:
         return 'quantity_limit'
-    if auction.buyout > min(settings.item_exposure, settings.capital - settings.reserve,
-                            max(settings.stronger_demand_budget, settings.longer_term_budget)):
+    if auction.buyout > min(settings.item_exposure, settings.capital - settings.reserve):
         return 'purchase_budget_exceeded'
     if valuation.sale_rate < settings.min_sale_rate or valuation.sold_per_day < settings.min_sold_per_day:
         return 'demand_below_threshold'
@@ -95,13 +94,13 @@ def evaluate(auction, valuation, settings, now):
                      'Full listing purchase; estimated proceeds floor after auction cut, less purchase and per-listing costs. Regional sales statistics do not guarantee destination demand or resale proceeds.')
 
 
-def rank(candidates, strategy):
-    """Sort and deduplicate auction identities; apply the chosen allocation budget upstream."""
-    if strategy not in {'stronger-demand', 'longer-term'}:
+def rank(candidates, strategy='general'):
+    """Order by estimated profit and deduplicate; legacy strategy names are inert."""
+    if strategy not in {'general', 'stronger-demand', 'longer-term'}:
         raise ValueError('Unknown ranking strategy')
     def ordering(c):
         v = c.valuation
-        metrics = (v.sold_per_day, v.sale_rate, c.roi, c.profit) if strategy == 'stronger-demand' else (c.profit, c.roi, v.sold_per_day, v.sale_rate)
+        metrics = (c.profit, c.roi, v.sold_per_day, v.sale_rate)
         return tuple(x.copy_negate() if isinstance(x, Decimal) else -x for x in metrics) + (c.key,)
     result, seen = [], set()
     for c in sorted(candidates, key=ordering):

@@ -60,10 +60,22 @@ def test_settings_reject_invalid(data):
 def test_settings_defaults_and_serialization():
     settings = Settings.from_dict({})
     assert settings.capital == 300_000_000
-    assert settings.stronger_demand_budget + settings.longer_term_budget + settings.reserve == settings.capital
     assert settings.min_profit == 1_000_000
     assert settings.min_roi == Decimal('0.10')
     assert settings.min_sale_rate == settings.min_sold_per_day == Decimal('0.01')
     assert settings.max_tsm_age_hours == 48 and settings.max_auction_age_hours == 2
     assert settings.max_copies == 1 and settings.extra_costs == 0
     assert Settings.from_dict(settings.to_dict()) == settings
+
+
+def test_legacy_settings_allocation_totals_are_inert_and_preserved():
+ settings=Settings.from_dict({'capital':60_000_000,'reserve':10_000_000,
+                             'stronger_demand_budget':200_000_000,'longer_term_budget':50_000_000})
+ assert settings.capital==60_000_000
+ assert settings.to_dict()['stronger_demand_budget']==200_000_000
+ assert settings.to_dict()['longer_term_budget']==50_000_000
+
+
+def test_reserve_cannot_exceed_capital():
+ with pytest.raises(ValueError):
+  Settings.from_dict({'reserve':300_000_001})

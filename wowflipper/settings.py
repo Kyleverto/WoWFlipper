@@ -6,6 +6,7 @@ from .models import integer, decimal
 @dataclass(frozen=True)
 class Settings:
     capital: int = 300_000_000
+    # Retained only to read and preserve previously saved settings.
     stronger_demand_budget: int = 200_000_000
     longer_term_budget: int = 50_000_000
     reserve: int = 50_000_000
@@ -51,8 +52,8 @@ class Settings:
         result = cls(**values)
         if result.region != 'us':
             raise ValueError('Only retail US is supported')
-        if result.stronger_demand_budget + result.longer_term_budget + result.reserve > result.capital:
-            raise ValueError('Allocation plus reserve exceeds capital')
+        if result.reserve > result.capital:
+            raise ValueError('Reserve exceeds capital')
         if result.item_exposure > result.capital:
             raise ValueError('Item exposure exceeds capital')
         return result

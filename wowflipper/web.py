@@ -91,7 +91,7 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
     @app.post('/api/shopping')
     def select():
         data=body(['key','strategy','destination','request_id'])
-        return jsonify(safe(portfolio().select(tuple(data['key']),data['strategy'],data['destination'],data['request_id'])))
+        return jsonify(safe(portfolio().select(tuple(data['key']),data.get('strategy','general'),data['destination'],data['request_id'])))
     @app.post('/api/shopping/remove')
     def remove():
         data=body(['key','request_id']); return jsonify(portfolio().remove(tuple(data['key']),data['request_id']))

@@ -85,15 +85,13 @@ class MarketQuery:
                 else: self.exclusions.append({'key':key,'item_id':auction.item_id,'name':value.name if value else f'Item {auction.item_id}','reason':('stale_or_unknown_valuation_source' if value and not valuation_fresh else exclusion_reason(auction,value,self.settings,self.now)) if value else 'missing-valuation'})
     def candidate(self,key): return self.candidates.get(tuple(key))
     def _ordered(self,args):
-        strategy=args.get('strategy','stronger-demand')
-        if strategy not in ('stronger-demand','longer-term'): raise ValueError('Unknown ranking')
         query=args.get('q','').casefold().strip()
-        candidates=[c for c in rank(self.candidates.values(),strategy) if query in c.valuation.name.casefold() or query in str(c.auction.item_id)]
-        sort=args.get('sort','ranking'); direction=args.get('direction','desc')
+        candidates=[c for c in rank(self.candidates.values()) if query in c.valuation.name.casefold() or query in str(c.auction.item_id)]
+        sort=args.get('sort','profit'); direction=args.get('direction','desc')
         sorts={'name':lambda c:c.valuation.name.casefold(),'cost':lambda c:c.auction.buyout,'profit':lambda c:c.profit,'roi':lambda c:c.roi,'quantity':lambda c:c.auction.quantity,'sale_rate':lambda c:c.valuation.sale_rate,'sold_per_day':lambda c:c.valuation.sold_per_day}
-        if sort!='ranking':
-            if sort not in sorts or direction not in ('asc','desc'): raise ValueError('Unknown sort')
-            candidates.sort(key=sorts[sort],reverse=direction=='desc')
+        if sort=='ranking': sort='profit'  # Legacy query compatibility.
+        if sort not in sorts or direction not in ('asc','desc'): raise ValueError('Unknown sort')
+        candidates.sort(key=sorts[sort],reverse=direction=='desc')
         return candidates
     @staticmethod
     def page_info(args,total):

@@ -20,8 +20,6 @@ function savePending() {
 }
 const moneyFields = {
   capital: "Initial capital",
-  stronger_demand_budget: "Stronger demand allocation",
-  longer_term_budget: "Longer term allocation",
   reserve: "Cash reserve",
   item_exposure: "Maximum item exposure",
   min_profit: "Minimum estimated profit",
@@ -150,7 +148,6 @@ async function action(button, work) {
 }
 function params() {
   return new URLSearchParams({
-    strategy: $("ranking").value,
     q: $("search").value,
     sort: $("sort").value,
     direction: $("direction").value,
@@ -525,7 +522,6 @@ function renderResults() {
           "/api/shopping",
           {
             key: row.key,
-            strategy: $("ranking").value,
             destination: $("destination").value,
           },
           "select:" + row.key.join(":"),
@@ -558,7 +554,7 @@ async function loadShopping() {
       el("strong", item.candidate.valuation.name),
       el(
         "p",
-        `${item.quantity} units • ${gold(item.cost)} quoted • ${item.destination} • ${item.strategy}`,
+        `${item.quantity} units • ${gold(item.cost)} quoted • ${item.destination}`,
       ),
       el(
         "p",
@@ -630,7 +626,7 @@ function renderLedger() {
       "Item",
       "Remaining units",
       "Remaining cost basis",
-      "Destination / strategy",
+      "Destination",
     ]);
     for (const lot of inventory) {
       const tr = el("tr");
@@ -638,7 +634,7 @@ function renderLedger() {
       addCell(tr, lot.candidate.valuation.name);
       addCell(tr, lot.remaining_quantity);
       addCell(tr, gold(lot.remaining_cost));
-      addCell(tr, `${lot.destination} / ${lot.strategy}`);
+      addCell(tr, lot.destination);
       body.append(tr);
     }
     $("inventory").append(wrap);
@@ -679,6 +675,7 @@ function renderLedger() {
           "recorded_at",
           "candidate",
           "provenance",
+          "strategy",
           "key",
         ].includes(key)
       )
@@ -690,6 +687,7 @@ function renderLedger() {
           value === null
             ? "Original event voided"
             : Object.entries(value)
+                .filter(([k]) => k !== "strategy")
                 .map(
                   ([k, v]) =>
                     `${k.replaceAll("_", " ")}: ${["cost", "net_proceeds", "amount"].includes(k) ? gold(v) : v}`,
@@ -848,7 +846,7 @@ function renderCorrection(force = false) {
   if (!event) return;
   container.hidden = $("correction-action").value === "void";
   const schemas = {
-    purchase: ["cost", "quantity", "strategy", "destination", "note"],
+    purchase: ["cost", "quantity", "destination", "note"],
     sale: ["purchase_id", "quantity", "net_proceeds", "note"],
     fee: ["purchase_id", "amount", "note"],
     "balance-adjustment": ["amount", "note"],
@@ -870,13 +868,11 @@ function renderCorrection(force = false) {
       select.value = event[key] || "";
       label.append(select);
       container.append(label);
-    } else if (key === "strategy" || key === "destination") {
+    } else if (key === "destination") {
       const label = el("label", key),
         select = el("select");
       select.id = "correct-" + key;
-      for (const value of key === "strategy"
-        ? ["stronger-demand", "longer-term"]
-        : state.settings.selling_realms)
+      for (const value of state.settings.selling_realms)
         select.append(new Option(value, value));
       select.value = event[key];
       label.append(select);
@@ -1018,7 +1014,7 @@ for (const button of document.querySelectorAll("nav button"))
       message(error.message, true);
     }
   };
-for (const id of ["ranking", "sort", "direction", "destination"])
+for (const id of ["sort", "direction", "destination"])
   $(id).onchange = () => {
     resultsPage = 1;
     loadResults().catch((e) => message(e.message, true));

@@ -86,15 +86,14 @@ def test_duplicate_identity_other_destination(portfolio):
     portfolio.record({'type':'purchase','key':['us',1,1]},'p')
     with pytest.raises(ValueError): portfolio.select(('us',1,1),'stronger-demand','agamaggan','duplicate2')
 
-def test_held_quantity_exposure_allocations_and_reserve(portfolio):
+def test_held_quantity_exposure_and_reserve(portfolio):
     p=portfolio
     first=p.candidate_provider(('us',1,1))
     second=replace(first,key=('us',1,2),auction=replace(first.auction,auction_id=2))
     p.candidate_provider=lambda key: first if key==first.key else second if key==second.key else None
     buy(p)
     settings=p.repository.load_settings()
-    for changes, reason in [({'max_copies':5},'quantity'),({'item_exposure':1500000},'exposure'),
-                            ({'stronger_demand_budget':1500000},'allocation')]:
+    for changes, reason in [({'max_copies':5},'quantity'),({'item_exposure':1500000},'exposure')]:
         p.repository.save_settings(replace(settings,**changes))
         with pytest.raises(ValueError,match=reason): p.select(second.key,'stronger-demand','agamaggan',reason)
     p.repository.save_settings(settings)
@@ -159,3 +158,30 @@ def test_successive_corrections_and_restore_after_void(portfolio):
  assert p.summary()['cash']==299699999
  assert p.summary()['inventory'][0]['remaining_quantity']==2
  assert len(p.history())==6
+
+
+def test_exhausted_legacy_allocations_allow_selection_purchase_and_corrections(portfolio):
+ p=portfolio
+ first=p.candidate_provider(('us',1,1))
+ second=replace(first,key=('us',1,2),auction=replace(first.auction,auction_id=2))
+ p.candidate_provider=lambda key: first if key==first.key else second if key==second.key else None
+ purchase=buy(p)
+ original=p.history()[0]
+ p.select(second.key,'longer-term','agamaggan','legacy-selection')
+ p.repository.save_settings(replace(p.repository.load_settings(),stronger_demand_budget=0,longer_term_budget=0))
+ assert p.shopping()[0]['valid']
+ assert p.summary()['limits_error'] is None
+ assert 'allocations' not in p.summary()
+ p.record({'type':'purchase','key':list(second.key)},'second-purchase')
+ p.record({'type':'correction','target_id':purchase['id'],'replacement':{'strategy':'longer-term','cost':900000}},'legacy-correction')
+ assert p.history()[0]==original
+ assert p.summary()['cash']==298099999
+ assert p.summary()['inventory'][0]['strategy']=='longer-term'
+
+
+def test_single_budget_selection_defaults_to_general(portfolio):
+ selected=portfolio.select(('us',1,1),destination='agamaggan',request_id='general-selection')
+ assert selected['strategy']=='general'
+ purchase=portfolio.record({'type':'purchase','key':['us',1,1]},'general-purchase')
+ portfolio.record({'type':'correction','target_id':purchase['id'],'replacement':{'cost':900000}},'general-correction')
+ assert portfolio.summary()['inventory_cost']==900000
