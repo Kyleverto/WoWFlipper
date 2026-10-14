@@ -17,7 +17,7 @@ const elements=new Map();function node(id){if(!elements.has(id))elements.set(id,
 const requests=[];let uuid=0;
 const context={console,URLSearchParams,crypto:{randomUUID:()=>`id-${++uuid}`},sessionStorage:{getItem:()=>null,setItem:()=>{}},document:{getElementById:node,createElement:tag=>new Node(tag),createTextNode:text=>new Node('text',text)},Option:function(text,value){const n=new Node('option',text);n.value=String(value);return n},fetch:(path,opts)=>new Promise((resolve,reject)=>requests.push({path,payload:opts?.body?JSON.parse(opts.body):undefined,resolve:body=>resolve({ok:true,json:async()=>body}),fail:body=>resolve({ok:false,status:400,json:async()=>body}),reject}))};
 vm.createContext(context);const source=fs.readFileSync('wowflipper/static/app.js','utf8');vm.runInContext(source.slice(0,source.indexOf('$("realm-search").oninput')),context);
-context.fixture={settings:{selling_realms:['home','away'],resale_factor:'1'}};vm.runInContext('state=fixture;csrf="token";loadState=async()=>{}',context);node('destination').value='home';
+context.fixture={settings:{selling_realms:['home','away'],resale_factor:'1'}};vm.runInContext('state=fixture;csrf="token";const reloadState=loadState;loadState=async()=>{}',context);node('destination').value='home';
 const row={key:['us',1,2],auction:{item_id:7,quantity:1,buyout:10000,category:'toy'},valuation:{name:'Item',avg_sale_price:30000,market_value:30000,historical:30000,sale_rate:1,sold_per_day:1},source_realms:['buy'],mode:'offline-demo',roi:1,profit:10000,proceeds:20000,risks:[],comparisons:[{realm:'home',mode:'offline-demo',listing_count:1,quantity:1,lowest_unit_ask:20000,assumed_unit_resale:30000,risks:[]}]};
 const text=n=>[n.textContent,...n.children.map(text)].join(' '),controls=(root,tag)=>root.querySelectorAll(tag),button=(root,label)=>controls(root,'button').find(n=>n.textContent===label),flush=()=>new Promise(resolve=>setImmediate(resolve)),submit=(form,buy)=>form.onsubmit({preventDefault(){},submitter:buy});
 '''
@@ -167,4 +167,27 @@ def test_removed_realm_pending_destination_success_can_be_repaired():
     run_behavior(r'''
 context.items=[{key:['us',1,2],candidate:row,cost:10000,quantity:1,destination:'home',valid:true}];vm.runInContext('state.settings.selling_realms=["home"];pending.set("destination:us:1:2",{fingerprint:JSON.stringify(["/api/shopping/destination",{key:["us",1,2],destination:"away"}]),id:"destination-id"})',context);const loading=vm.runInContext('loadShopping()',context);requests[0].resolve(context.items);await loading;
 const current=node('shopping-items').children[0],save=button(current,'Save destination'),picker=controls(current,'select')[0];const saving=save.onclick();requests[1].resolve({...context.items[0],destination:'away'});await flush();requests[2].resolve([{...context.items[0],destination:'away',valid:false,validation_error:'Realm unavailable'}]);await saving;assert.equal(picker.disabled,false);assert.equal(button(current,'Record purchase').disabled,true);picker.value='home';picker.onchange();assert.equal(save.disabled,false);
+''')
+
+
+def test_shopping_buy_realms_use_source_house_and_refresh_without_losing_drafts():
+    run_behavior(r'''
+context.items=[{key:['us',1,2],candidate:{...row,auction:{...row.auction,house_id:17}},cost:10000,quantity:1,destination:'home',valid:true},{key:['us',18,3],candidate:row,cost:10000,quantity:1,destination:'home',valid:true},{key:['us',99,4],candidate:row,cost:10000,quantity:1,destination:'home',valid:true}];
+context.fixture.realms=[{slug:'home',name:'Selling Home',house_id:1},{slug:'first',name:'First Source',house_id:17},{slug:'sibling',name:'Connected Sibling',house_id:17},{slug:'legacy-source',house_id:18}];
+context.fixture.settings.buying_realms=['first'];context.fixture.refresh={running:false};
+let loading=vm.runInContext('loadShopping()',context);requests[0].resolve(context.items);await loading;
+const original=node('shopping-items').children[0],legacy=node('shopping-items').children[1],unmapped=node('shopping-items').children[2];
+const sourceLine=n=>controls(n,'p').find(p=>p.textContent.startsWith('Buy on:')).textContent;
+assert.equal(sourceLine(original),'Buy on: First Source, Connected Sibling • Connected auction house 17');
+assert.ok(text(original).includes('Saved destination: home'));assert.ok(!sourceLine(original).includes('Selling Home'));
+assert.equal(sourceLine(legacy),'Buy on: legacy-source • Connected auction house 18');
+assert.equal(sourceLine(unmapped),'Buy on: Realm mapping unavailable • Connected auction house 99');
+const paid=controls(original,'input')[0],select=controls(original,'select')[0];paid.value='4.5678';select.value='away';select.onchange();
+context.fixture.realms=[{slug:'new-source',name:'Updated Source',house_id:17}];
+vm.runInContext('renderCapital=renderSources=renderLedger=populateDestinations=()=>{};currentTab="shopping"',context);
+loading=vm.runInContext('reloadState()',context);requests[1].resolve(context.fixture);await loading;
+assert.equal(sourceLine(original),'Buy on: Updated Source • Connected auction house 17');
+loading=vm.runInContext('loadShopping()',context);requests[2].resolve(context.items);await loading;
+assert.equal(node('shopping-items').children[0],original);assert.equal(paid.value,'4.5678');assert.equal(select.value,'away');assert.equal(button(original,'Record purchase').disabled,true);
+assert.equal(sourceLine(legacy),'Buy on: Realm mapping unavailable • Connected auction house 18');
 ''')

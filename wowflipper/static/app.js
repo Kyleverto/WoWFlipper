@@ -214,6 +214,7 @@ async function loadState(initial = false) {
   if (initial) renderSettings();
   else if (currentTab === "settings") renderRealmSelection(true);
   populateDestinations();
+  for (const controller of shoppingRows.values()) controller.updateSource();
 }
 function renderCapital() {
   const container = $("capital");
@@ -598,6 +599,14 @@ async function loadShopping() {
     }
     const row = el("div", undefined, "shopping-row"),
       info = el("div");
+    const sourceHouse = item.candidate.auction?.house_id ?? item.key[1];
+    const source = el("p");
+    function updateSource() {
+      const names = (state.realms || []).filter(realm => realm.house_id === sourceHouse)
+        .map(realm => realm.name || realm.slug);
+      source.textContent = `Buy on: ${names.length ? names.join(", ") : "Realm mapping unavailable"} • Connected auction house ${sourceHouse}`;
+    }
+    updateSource();
     const eligibility = el("p", item.valid ? "Currently eligible; manually verify in game" : item.validation_error, "caution");
     info.append(
       el("strong", item.candidate.valuation.name),
@@ -605,6 +614,7 @@ async function loadShopping() {
         "p",
         `${item.quantity} units • ${gold(item.cost)} quoted`,
       ),
+      source,
       eligibility,
     );
     const form = el("form"),
@@ -706,7 +716,8 @@ async function loadShopping() {
         await loadState();
         await loadShopping();
       });
-    const controller = {row, update(current) {
+    const controller = {row, updateSource, update(current) {
+      updateSource();
       const choice = destination.select.value;
       const refreshed = destinationControl(choice, item.candidate.valuation.name);
       destination.select.replaceChildren(...refreshed.select.options);
