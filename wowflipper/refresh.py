@@ -95,6 +95,7 @@ class RefreshService:
                     if auction.item_id not in metadata_by_item:
                         metadata_by_item[auction.item_id]=self.repository.cache_fresh(f'item:us:{auction.item_id}',7*86400)
             now=datetime.now(timezone.utc); attempted=set(); pending_by_house={}
+            resale_overrides=self.repository.load_resale_overrides()
             valuation_fresh=bool(tsm and is_fresh(tsm.source_time,settings.max_tsm_age_hours,now))
             for house in sorted(buy_houses & snapshots.keys()):
                 snapshot=snapshots[house]
@@ -108,7 +109,7 @@ class RefreshService:
                         plausible=replace(auction,source_time=snapshot.source_time,
                             category=next(iter(settings.categories),'unknown'),
                             metadata={'simple_identity':True,'tradeability':True})
-                        if not valuation_fresh or not valuation or exclusion_reason(plausible,valuation,settings,now): continue
+                        if not valuation_fresh or not valuation or exclusion_reason(plausible,valuation,settings,now,resale_overrides.get(item)): continue
                         if counts[house]['metadata_fetched']>=100:
                             pending.add(item); continue
                         attempted.add(item)

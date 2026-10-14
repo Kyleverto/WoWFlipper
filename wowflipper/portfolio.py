@@ -135,11 +135,13 @@ class Portfolio:
     def _selected(self, db):
         return [json.loads(row[0]) for row in db.execute('SELECT data FROM portfolio_selected ORDER BY rowid')]
 
-    def _candidate(self, selection, settings):
+    def _candidate(self, selection, settings, db):
         candidate = self.candidate_provider(tuple(selection['key']))
         if candidate is None or list(candidate.key) != selection['key']:
             raise ValueError('Selection is stale: auction no longer actionable')
-        if evaluate(candidate.auction, candidate.valuation, settings, datetime.now(timezone.utc)) is None:
+        candidate = evaluate(candidate.auction, candidate.valuation, settings, datetime.now(timezone.utc),
+                             self.repository.load_resale_overrides(db).get(candidate.auction.item_id))
+        if candidate is None:
             raise ValueError('Selection is stale or excluded by current settings')
         if selection['destination'] not in settings.selling_realms:
             raise ValueError('Selling realm is no longer configured')
@@ -189,7 +191,8 @@ class Portfolio:
                          'item_id': candidate.auction.item_id, 'quantity': candidate.auction.quantity,
                          'cost': candidate.auction.buyout, 'candidate': asdict(candidate)}
             selection = json.loads(serialize(selection))
-            self._candidate(selection, settings)
+            fresh = self._candidate(selection, settings, db)
+            selection["candidate"] = json.loads(serialize(asdict(fresh)))
             state = self._replay(self._events(db), self._base(db, settings))
             self._limits(state, self._selected(db) + [selection], settings)
             db.execute('INSERT INTO portfolio_selected VALUES(?,?)', (serialize(key), serialize(selection)))
@@ -291,9 +294,9 @@ class Portfolio:
                 selected = next((s for s in selections if s['key'] == key), None)
                 if selected is None:
                     raise ValueError('Select this listing before recording purchase')
-                fresh = self._candidate(selected, settings)
+                fresh = self._candidate(selected, settings, db)
                 for selection in selections:
-                    self._candidate(selection, settings)
+                    self._candidate(selection, settings, db)
                 self._limits(state, selections, settings)
                 actual_cost = integer(event.get('cost', selected['cost']), 1)
                 spending = [dict(s, cost=actual_cost) if s['key'] == key else s for s in selections]
@@ -363,7 +366,8 @@ class Portfolio:
             for selection in selections:
                 reason = global_reason
                 try:
-                    self._candidate(selection, settings)
+                    fresh = self._candidate(selection, settings, db)
+                    selection = dict(selection, candidate=json.loads(serialize(asdict(fresh))))
                 except ValueError as exc:
                     reason = str(exc)
                 result.append(dict(selection, valid=reason is None, validation_error=reason))

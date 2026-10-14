@@ -11,6 +11,9 @@ let resultsSequence = 0;
 let resultsRequest = null;
 let resultsPage = 1, exclusionsPage = 1, exclusionsSequence = 0;
 let correctionDirty = false;
+let resaleSaving = false;
+let resaleMutationPending = false, resaleGeneration = 0;
+const resaleDrafts = new Map();
 const pending = new Map(
   JSON.parse(sessionStorage.getItem("pending-ledger-actions") || "[]"),
 );
@@ -212,7 +215,7 @@ async function loadState(initial = false) {
   renderSources();
   renderLedger();
   if (initial) renderSettings();
-  else if (currentTab === "settings") renderRealmSelection(true);
+  else if (currentTab === "settings") { renderRealmSelection(true); renderResaleOverrides(); }
   populateDestinations();
   for (const controller of shoppingRows.values()) controller.updateSource();
 }
@@ -329,6 +332,7 @@ function retireResults() {
   invalidateResults();
 }
 function loadResults(force = false) {
+  if (resaleMutationPending) return Promise.resolve();
   const query = params().toString();
   if (!force && resultsRequest?.query === query) return resultsRequest.promise;
   resultsRequest?.controller.abort();
@@ -467,7 +471,8 @@ function renderResults() {
     addCell(tr, a.quantity);
     addCell(tr, gold(a.buyout));
     addCell(tr, gold(a.buyout / a.quantity));
-    addCell(tr, gold(v.avg_sale_price * Number(state.settings.resale_factor)));
+    const resaleCell = addCell(tr, gold(effectiveResale(row)));
+    if (row.resale_override) resaleCell.append(el("small", "Manual resale"));
     addCell(tr, gold(row.proceeds));
     addCell(tr, gold(row.profit), "positive");
     addCell(tr, (Number(row.roi) * 100).toFixed(1) + "%");
@@ -538,6 +543,7 @@ function renderResults() {
     const compareControls = el("div", undefined, "row-actions");
     compareControls.append(compareDestination.label, compareSelect);
     detail.append(
+      resaleVerification(row),
       comparisons,
       compareControls,
       el(
@@ -571,9 +577,9 @@ function renderResults() {
   container.append(wrap);
 }
 async function loadShopping() {
-  const sequence = ++shoppingSequence;
+  const sequence = ++shoppingSequence, generation = resaleGeneration;
   const loaded = await api("/api/shopping");
-  if (sequence !== shoppingSequence) return;
+  if (sequence !== shoppingSequence || generation !== resaleGeneration || resaleMutationPending) return;
   shopping = loaded;
   const keys = new Set(shopping.map(item => JSON.stringify(item.key)));
   for (const key of shoppingRows.keys()) if (!keys.has(key)) shoppingRows.delete(key);
@@ -635,16 +641,16 @@ async function loadShopping() {
     save.type = "button";
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
-    let saving = false, purchasing = false, verified = true;
+    let saving = false, purchasing = false, verified = true, resaleStale = false;
     function updateDestination() {
       const dirty = destination.select.value !== item.destination;
       const unconfirmed = pending.has(destinationKey);
       const purchaseUnconfirmed = pending.has(purchaseKey);
       input.disabled = purchasing || purchaseUnconfirmed;
-      buy.disabled = purchasing || saving || dirty || unconfirmed || !verified || !item.valid || !configuredDestination(item.destination);
+      buy.disabled = purchasing || saving || resaleStale || dirty || unconfirmed || !verified || !item.valid || !configuredDestination(item.destination);
       save.disabled = purchasing || purchaseUnconfirmed || saving || (!configuredDestination(destination.select.value) && !unconfirmed) || (!dirty && !unconfirmed && verified);
       destination.select.disabled = purchasing || purchaseUnconfirmed || saving || unconfirmed || !state.settings.selling_realms.length;
-      status.textContent = saving ? "Saving destination…" : unconfirmed ? "Destination save not confirmed. Retry Save destination before purchasing." : !verified ? "Destination saved; eligibility not confirmed. Retry Save destination." : dirty ? "Destination changed. Save destination before recording a purchase." : "Saved destination: " + item.destination;
+      status.textContent = resaleStale ? "Resale changed; reload the shopping list to confirm eligibility." : saving ? "Saving destination…" : unconfirmed ? "Destination save not confirmed. Retry Save destination before purchasing." : !verified ? "Destination saved; eligibility not confirmed. Retry Save destination." : dirty ? "Destination changed. Save destination before recording a purchase." : "Saved destination: " + item.destination;
     }
     destination.select.onchange = updateDestination;
     save.onclick = async () => {
@@ -656,10 +662,13 @@ async function loadShopping() {
         if (shoppingRows.get(rowKey) !== controller) return;
         item.destination = updated.destination;
         verified = false;
+        const generation = resaleGeneration;
         const current = (await api("/api/shopping")).find(entry => JSON.stringify(entry.key) === JSON.stringify(item.key));
+        if (generation !== resaleGeneration || resaleMutationPending) return;
         if (!current) throw Error("This selection is no longer available. Reload the shopping list.");
         if (shoppingRows.get(rowKey) !== controller) return;
         Object.assign(item, current);
+        resaleStale = false;
         eligibility.textContent = item.valid ? "Currently eligible; manually verify in game" : item.validation_error;
         verified = true;
         ++shoppingSequence;
@@ -716,7 +725,10 @@ async function loadShopping() {
         await loadState();
         await loadShopping();
       });
-    const controller = {row, updateSource, update(current) {
+    const controller = {row, updateSource, invalidateEligibility() {
+      resaleStale = true;
+      updateDestination();
+    }, update(current) {
       updateSource();
       const choice = destination.select.value;
       const refreshed = destinationControl(choice, item.candidate.valuation.name);
@@ -724,6 +736,7 @@ async function loadShopping() {
       destination.select.value = choice;
       if (!saving && !purchasing) {
         Object.assign(item, current);
+        resaleStale = false;
         eligibility.textContent = item.valid ? "Currently eligible; manually verify in game" : item.validation_error;
       }
       updateDestination();
@@ -836,7 +849,135 @@ function field(container, id, label, value, type = "text") {
   container.append(node);
   return input;
 }
+function effectiveResale(row) {
+  return row.assumed_unit_resale ?? row.valuation.avg_sale_price * Number(state.settings.resale_factor);
+}
+async function saveResaleOverride(itemId, value, clear = false) {
+  if (resaleSaving) throw Error("A resale override is being saved. Wait before changing another item.");
+  const rawId = String(itemId).trim();
+  const id = Number(rawId);
+  if (!/^\d+$/.test(rawId) || !Number.isSafeInteger(id) || id <= 0)
+    throw Error("Enter a positive whole item ID within supported bounds");
+  const payload = {item_id: id};
+  if (!clear) {
+    payload.unit_price = copper(value);
+    if (payload.unit_price <= 0) throw Error("Unit resale must be greater than zero");
+  }
+  resaleSaving = true;
+  resaleMutationPending = true;
+  ++resaleGeneration;
+  retireResults();
+  ++shoppingSequence;
+  for (const controller of shoppingRows.values()) controller.invalidateEligibility();
+  try {
+    try {
+      await api(clear ? "/api/resale-overrides/remove" : "/api/resale-overrides", payload);
+    } catch (error) {
+      if (error.message.includes("request ID is preserved"))
+        throw Error("Override save was not confirmed. Retry Save or Clear, or reload to inspect active overrides.");
+      throw error;
+    } finally {
+      // A read started while the POST was pending may still contain the old price.
+      resaleMutationPending = false;
+      ++resaleGeneration;
+      ++shoppingSequence;
+    }
+    resaleDrafts.delete(id);
+    await loadState();
+    renderResaleOverrides();
+    await Promise.all([loadResults(true), loadShopping()]);
+    message(clear ? "Resale override cleared. Current estimates refreshed." : "Resale override saved for this item across all realms. Current estimates refreshed.");
+  } finally {
+    resaleSaving = false;
+  }
+}
+function resaleEditor(itemId, price, hasOverride) {
+  const form = el("form", undefined, "row-actions");
+  const label = el("label", "Unit resale (gold)"), input = el("input");
+  input.inputMode = "decimal";
+  input.value = resaleDrafts.get(itemId) ?? inputGold(price);
+  input.oninput = () => resaleDrafts.set(itemId, input.value);
+  label.append(input);
+  const save = el("button", "Save override"), clear = el("button", "Clear override", "secondary"), status = el("span");
+  save.type = "submit";
+  clear.type = "button";
+  clear.disabled = !hasOverride;
+  let busy = false;
+  const perform = async removing => {
+    if (busy || resaleSaving) return;
+    busy = true;
+    resaleDrafts.set(itemId, input.value);
+    input.disabled = save.disabled = clear.disabled = true;
+    status.textContent = "Saving…";
+    try {
+      await saveResaleOverride(itemId, input.value, removing);
+      status.textContent = removing ? "Override cleared" : "Override saved";
+    } catch (error) {
+      status.textContent = error.message;
+      message(error.message, true);
+    } finally {
+      busy = false;
+      input.disabled = save.disabled = false;
+      clear.disabled = !hasOverride;
+    }
+  };
+  form.onsubmit = event => { event.preventDefault(); return perform(false); };
+  save.onclick = () => perform(false);
+  clear.onclick = () => perform(true);
+  form.append(label, save, clear, status);
+  return form;
+}
+function resaleVerification(row) {
+  const box = el("div", undefined, "resale-verification"), v = row.valuation, override = row.resale_override;
+  box.append(
+    el("h3", "Verify unit resale"),
+    el("p", `Raw TSM average sale price: ${gold(v.avg_sale_price)} • Updated ${v.updated_at || "Unknown"} (${age(v.updated_at)})`),
+    el("p", `Global resale factor: ${Number(state.settings.resale_factor) * 100}%`),
+    el("p", `Effective unit resale: ${gold(effectiveResale(row))}`),
+    el("p", override ? `Source: manual override • Saved ${override.updated_at} (${age(override.updated_at)})` : "Source: TSM average sale price × global resale factor"),
+    el("p", "A manual override sets the final unit resale for this item across all realms until cleared. Source freshness and demand still apply."),
+    resaleEditor(row.auction.item_id, effectiveResale(row), !!override),
+  );
+  return box;
+}
+function renderResaleOverrides() {
+  const list = $("resale-overrides");
+  if (!list) return;
+  list.replaceChildren();
+  const overrides = state.resale_overrides || [];
+  if (!overrides.length) list.append(el("p", "No active resale overrides."));
+  for (const entry of overrides) {
+    const row = el("div", undefined, "shopping-row");
+    row.append(el("p", `Item ${entry.item_id} • Unit resale ${gold(entry.unit_price)} • Manual • Saved ${entry.updated_at} (${age(entry.updated_at)})`));
+    const edit = el("button", "Edit", "secondary"), clear = el("button", "Clear override", "secondary");
+    edit.type = clear.type = "button";
+    edit.onclick = () => {
+      $("override-item-id").value = String(entry.item_id);
+      $("override-unit-price").value = inputGold(entry.unit_price);
+    };
+    clear.onclick = async () => {
+      if (resaleSaving) return;
+      clear.disabled = true;
+      try { await saveResaleOverride(entry.item_id, null, true); }
+      catch (error) { message(error.message, true); }
+      finally { clear.disabled = false; }
+    };
+    row.append(edit, clear);
+    list.append(row);
+  }
+  const form = $("resale-override-form");
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (resaleSaving) return;
+    const controls = form.querySelectorAll("input,button");
+    for (const control of controls) control.disabled = true;
+    try { await saveResaleOverride($("override-item-id").value, $("override-unit-price").value); }
+    catch (error) { message(error.message, true); }
+    finally { for (const control of controls) control.disabled = false; }
+  };
+}
 function renderSettings() {
+  renderResaleOverrides();
   $("money-settings").replaceChildren();
   for (const [key, label] of Object.entries(moneyFields)) {
     const input = field(

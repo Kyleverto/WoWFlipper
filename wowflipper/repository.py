@@ -2,7 +2,7 @@
 import sqlite3, json, hashlib, os, tempfile, threading, time
 from pathlib import Path
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from .models import Snapshot, Auction, Valuation, integer, timestamp, decimal
 from .settings import Settings
@@ -85,7 +85,7 @@ class Repository:
         """Read small invalidation tokens in one consistent SQLite transaction."""
         with self.connect() as db:
             db.execute('BEGIN')
-            settings=tuple(db.execute("SELECT key,data FROM cache WHERE key IN ('settings','realms') ORDER BY key"))
+            settings=tuple(db.execute("SELECT key,data FROM cache WHERE key IN ('settings','realms','resale_overrides') ORDER BY key"))
             snapshots=tuple(db.execute('SELECT source,MAX(id) FROM snapshots GROUP BY source ORDER BY source'))
         return settings,snapshots
 
@@ -113,3 +113,30 @@ class Repository:
         return entry['value']
     def cache_timed(self,key,value):
         self.cache_put('timed:'+key,{'cached_at':time.time(),'value':value})
+
+    def load_resale_overrides(self, db=None):
+        if db is None:
+            entry=self.cache_get('resale_overrides') or {}
+        else:
+            row=db.execute("SELECT data FROM cache WHERE key='resale_overrides'").fetchone()
+            entry=json.loads(row[0]) if row else {}
+        return {int(key): value for key,value in entry.get('items',{}).items()}
+
+    def set_resale_override(self, item_id, unit_price):
+        item_id=integer(item_id,1); unit_price=integer(unit_price,1)
+        value={'item_id':item_id,'unit_price':unit_price,'updated_at':datetime.now(timezone.utc).isoformat()}
+        self._change_resale_override(item_id,value)
+        return value
+
+    def remove_resale_override(self, item_id):
+        self._change_resale_override(integer(item_id,1),None)
+
+    def _change_resale_override(self,item_id,value):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute("SELECT data FROM cache WHERE key='resale_overrides'").fetchone()
+            entry=json.loads(row[0]) if row else {'revision':0,'items':{}}
+            if value is None: entry['items'].pop(str(item_id),None)
+            else: entry['items'][str(item_id)]=value
+            entry['revision']+=1
+            db.execute('INSERT OR REPLACE INTO cache VALUES(?,?)',('resale_overrides',json.dumps(entry)))

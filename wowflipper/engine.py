@@ -24,15 +24,15 @@ def _precision(settings):
     return max(80, sum(len(v.as_tuple().digits) + abs(v.as_tuple().exponent) for v in values) + 80)
 
 
-def _amounts(auction, valuation, settings):
-    resale = Decimal(valuation.avg_sale_price) * settings.resale_factor
+def _amounts(auction, valuation, settings, resale_override=None):
+    resale = Decimal(integer(resale_override["unit_price"], 1)) if resale_override else Decimal(valuation.avg_sale_price) * settings.resale_factor
     ceiling = resale * (1 - settings.discount) * auction.quantity
     proceeds = int((resale * auction.quantity * (1 - settings.auction_cut)).to_integral_value(rounding=ROUND_FLOOR))
     profit = proceeds - auction.buyout - settings.extra_costs
     return resale, ceiling, proceeds, profit, Decimal(profit) / auction.buyout
 
 
-def exclusion_reason(auction, valuation, settings, now):
+def exclusion_reason(auction, valuation, settings, now, resale_override=None):
     """First inspectable exclusion reason, or None when actionable."""
     if auction.region != settings.region or auction.region != 'us':
         return 'unsupported_region'
@@ -72,7 +72,7 @@ def exclusion_reason(auction, valuation, settings, now):
         return 'demand_below_threshold'
     with localcontext() as ctx:
         ctx.prec = _precision(settings)
-        _, ceiling, _, profit, roi = _amounts(auction, valuation, settings)
+        _, ceiling, _, profit, roi = _amounts(auction, valuation, settings, resale_override)
         if auction.buyout > ceiling:
             return 'discount_below_threshold'
         if profit < settings.min_profit or roi < settings.min_roi:
@@ -80,18 +80,18 @@ def exclusion_reason(auction, valuation, settings, now):
     return None
 
 
-def evaluate(auction, valuation, settings, now):
-    if exclusion_reason(auction, valuation, settings, now):
+def evaluate(auction, valuation, settings, now, resale_override=None):
+    if exclusion_reason(auction, valuation, settings, now, resale_override):
         return None
     with localcontext() as ctx:
         ctx.prec = _precision(settings)
-        _, _, proceeds, profit, roi = _amounts(auction, valuation, settings)
+        resale, _, proceeds, profit, roi = _amounts(auction, valuation, settings, resale_override)
     risks = ['regional_demand_not_destination_specific', 'resale_price_is_assumption']
     if auction.metadata.get('tradeability') is not True:
         risks.append('unverified_tradeability')
     return Candidate((auction.region, auction.house_id, auction.auction_id), auction, valuation,
                      proceeds, profit, roi, (), tuple(risks),
-                     'Full listing purchase; estimated proceeds floor after auction cut, less purchase and per-listing costs. Regional sales statistics do not guarantee destination demand or resale proceeds.')
+                     'Full listing purchase; estimated proceeds floor after auction cut, less purchase and per-listing costs. Regional sales statistics do not guarantee destination demand or resale proceeds.', resale, dict(resale_override) if resale_override else None)
 
 
 def rank(candidates, strategy='general'):
@@ -134,7 +134,7 @@ def compare_destinations(candidate, snapshots, settings, now=None, index=None):
     results = []
     with localcontext() as ctx:
         ctx.prec = _precision(settings)
-        resale = Decimal(candidate.valuation.avg_sale_price) * settings.resale_factor
+        resale = candidate.assumed_unit_resale if candidate.assumed_unit_resale is not None else Decimal(candidate.valuation.avg_sale_price) * settings.resale_factor
         for slug in settings.selling_realms:
             snap = snapshots.get(slug)
             risks, matches = [], []

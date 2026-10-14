@@ -94,6 +94,8 @@ class Candidate:
     destinations: tuple
     risks: tuple
     explanation: str
+    assumed_unit_resale: Decimal | None = None
+    resale_override: dict | None = None
 
 def normalize_auction(data: dict, house_id: int, region: str) -> Auction | None:
     try:

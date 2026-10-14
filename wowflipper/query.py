@@ -56,6 +56,7 @@ class MarketQuery:
 
     def _build(self,repo):
         self.repo=repo; self.settings=repo.load_settings(); self.now=datetime.now(timezone.utc)
+        self.resale_overrides=repo.load_resale_overrides()
         self.realms=repo.cache_get('realms') or []
         self.mapping={r['slug']:r['house_id'] for r in self.realms}
         self.tsm=repo.latest('tsm:us',include_payload=False)
@@ -78,11 +79,11 @@ class MarketQuery:
             for auction in snapshot.records:
                 auction=replace(auction,source_time=snapshot.source_time)
                 value=self.values.get(auction.item_id)
-                candidate=evaluate(auction,value,self.settings,self.now) if value and valuation_fresh else None
+                candidate=evaluate(auction,value,self.settings,self.now,self.resale_overrides.get(auction.item_id)) if value and valuation_fresh else None
                 key=(auction.region,house,auction.auction_id)
                 if candidate:
                     self.candidates[key]=replace(candidate,auction=replace(auction,provenance=provenance))
-                else: self.exclusions.append({'key':key,'item_id':auction.item_id,'name':value.name if value else f'Item {auction.item_id}','reason':('stale_or_unknown_valuation_source' if value and not valuation_fresh else exclusion_reason(auction,value,self.settings,self.now)) if value else 'missing-valuation'})
+                else: self.exclusions.append({'key':key,'item_id':auction.item_id,'name':value.name if value else f'Item {auction.item_id}','reason':('stale_or_unknown_valuation_source' if value and not valuation_fresh else exclusion_reason(auction,value,self.settings,self.now,self.resale_overrides.get(auction.item_id))) if value else 'missing-valuation'})
     def candidate(self,key): return self.candidates.get(tuple(key))
     def _ordered(self,args):
         query=args.get('q','').casefold().strip()
