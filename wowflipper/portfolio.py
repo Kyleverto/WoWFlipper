@@ -195,6 +195,27 @@ class Portfolio:
             db.execute('INSERT INTO portfolio_selected VALUES(?,?)', (serialize(key), serialize(selection)))
             return self._save_request(db, request_id, payload, selection)
 
+    def change_destination(self, candidate_key, destination, request_id):
+        """Edit a selected plan without changing its quote, provenance, or ledger."""
+        key = auction_key(candidate_key)
+        payload = {'action': 'change_destination', 'key': key, 'destination': destination}
+        with self.repository.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            prior = self._request(db, request_id, payload)
+            if prior is not None:
+                return prior
+            row = db.execute('SELECT data FROM portfolio_selected WHERE key=?', (serialize(key),)).fetchone()
+            if row is None:
+                raise ValueError('Listing must be selected before changing destination')
+            settings = self._settings(db)
+            if not isinstance(destination, str) or destination not in settings.selling_realms:
+                raise ValueError('Destination must be a configured selling realm')
+            selection = json.loads(row[0])
+            selection['destination'] = destination
+            # Stale plans remain editable; record() revalidates every purchase.
+            db.execute('UPDATE portfolio_selected SET data=? WHERE key=?', (serialize(selection), serialize(key)))
+            return self._save_request(db, request_id, payload, selection)
+
     def remove(self, candidate_key, request_id):
         key = auction_key(candidate_key)
         payload = {'action': 'remove', 'key': key}

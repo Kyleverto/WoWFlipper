@@ -5,6 +5,8 @@ let state,
   shopping = [],
   csrf,
   currentTab = "opportunities";
+const shoppingRows = new Map();
+let shoppingSequence = 0;
 let resultsSequence = 0;
 let resultsRequest = null;
 let resultsPage = 1, exclusionsPage = 1, exclusionsSequence = 0;
@@ -178,6 +180,24 @@ function age(time) {
   return hours < 1
     ? Math.max(0, Math.round(hours * 60)) + "m"
     : hours.toFixed(1) + "h";
+}
+function destinationControl(value, name) {
+  const label = el("label", "Destination"), select = el("select");
+  select.setAttribute("aria-label", "Destination for " + name);
+  const realms = state.settings.selling_realms;
+  if (!realms.includes(value)) {
+    const placeholder = new Option(value ? value + " (no longer configured)" : "Choose selling realms in Settings", value || "");
+    placeholder.disabled = true;
+    select.append(placeholder);
+  }
+  for (const realm of realms) select.append(new Option(realm, realm));
+  select.value = value || "";
+  select.disabled = !realms.length;
+  label.append(select);
+  return {label, select};
+}
+function configuredDestination(value) {
+  return state.settings.selling_realms.includes(value);
 }
 async function loadState(initial = false) {
   state = await api("/api/state");
@@ -461,11 +481,26 @@ function renderResults() {
     td.append(controls);
     const inspect = el("button", "Compare", "secondary"),
       select = el("button", "Select listing");
-    controls.append(inspect, document.createTextNode(" "), select);
-    select.disabled = !$("destination").value;
-    select.title = select.disabled
-      ? "Choose a configured selling realm in Settings"
-      : "Reserve this whole listing";
+    const selectionKey = "select:" + row.key.join(":");
+    const unconfirmedSelection = pending.get(selectionKey);
+    let destination = unconfirmedSelection ? JSON.parse(unconfirmedSelection.fingerprint)[1].destination : $("destination").value, selecting = false;
+    const rowDestination = destinationControl(destination, v.name);
+    const compareDestination = destinationControl(destination, v.name + " comparison");
+    const compareSelect = el("button", "Select listing");
+    function updateSelection() {
+      for (const picker of [rowDestination.select, compareDestination.select]) {
+        picker.value = destination;
+        picker.disabled = selecting || pending.has(selectionKey) || !state.settings.selling_realms.length;
+      }
+      for (const button of [select, compareSelect]) {
+        button.disabled = selecting || (!configuredDestination(destination) && !pending.has(selectionKey));
+        button.title = button.disabled ? "Choose a configured selling realm in Settings" : "Reserve this whole listing";
+      }
+    }
+    for (const picker of [rowDestination.select, compareDestination.select])
+      picker.onchange = () => { destination = picker.value; updateSelection(); };
+    controls.append(inspect, rowDestination.label, select);
+    updateSelection();
     body.append(tr);
     const details = el("tr", undefined, "details");
     details.hidden = true;
@@ -503,8 +538,11 @@ function renderResults() {
       );
       comparisons.append(box);
     }
+    const compareControls = el("div", undefined, "row-actions");
+    compareControls.append(compareDestination.label, compareSelect);
     detail.append(
       comparisons,
+      compareControls,
       el(
         "p",
         `Auction ${a.auction_id} • Source ${a.source_time} • Valuation ${v.updated_at} • Immutable evidence ${a.provenance}`,
@@ -516,25 +554,32 @@ function renderResults() {
       details.hidden = !details.hidden;
       inspect.setAttribute("aria-expanded", String(!details.hidden));
     };
-    select.onclick = () =>
-      action(select, async () => {
-        await mutation(
-          "/api/shopping",
-          {
-            key: row.key,
-            destination: $("destination").value,
-          },
-          "select:" + row.key.join(":"),
-        );
+    for (const button of [select, compareSelect]) button.onclick = async () => {
+      if (selecting || (!configuredDestination(destination) && !pending.has(selectionKey))) return;
+      selecting = true;
+      updateSelection();
+      try {
+        await mutation("/api/shopping", {key: row.key, destination}, selectionKey);
         message("Listing added to shopping list.");
         await loadState();
         await loadShopping();
-      });
+      } catch (error) {
+        message(error.message, true);
+      } finally {
+        selecting = false;
+        updateSelection();
+      }
+    };
   }
   container.append(wrap);
 }
 async function loadShopping() {
-  shopping = await api("/api/shopping");
+  const sequence = ++shoppingSequence;
+  const loaded = await api("/api/shopping");
+  if (sequence !== shoppingSequence) return;
+  shopping = loaded;
+  const keys = new Set(shopping.map(item => JSON.stringify(item.key)));
+  for (const key of shoppingRows.keys()) if (!keys.has(key)) shoppingRows.delete(key);
   const container = $("shopping-items");
   container.replaceChildren();
   if (!shopping.length) {
@@ -548,35 +593,88 @@ async function loadShopping() {
     return;
   }
   for (const item of shopping) {
+    const rowKey = JSON.stringify(item.key);
+    const existing = shoppingRows.get(rowKey);
+    if (existing) {
+      existing.update(item);
+      container.append(existing.row);
+      continue;
+    }
     const row = el("div", undefined, "shopping-row"),
       info = el("div");
+    const eligibility = el("p", item.valid ? "Currently eligible; manually verify in game" : item.validation_error, "caution");
     info.append(
       el("strong", item.candidate.valuation.name),
       el(
         "p",
-        `${item.quantity} units • ${gold(item.cost)} quoted • ${item.destination}`,
+        `${item.quantity} units • ${gold(item.cost)} quoted`,
       ),
-      el(
-        "p",
-        item.valid
-          ? "Currently eligible; manually verify in game"
-          : item.validation_error,
-        "caution",
-      ),
+      eligibility,
     );
     const form = el("form"),
       label = el("label", "Actual total paid (gold)"),
       input = el("input");
-    input.value = inputGold(item.cost);
+    const purchaseKey = "purchase:" + item.key.join(":");
+    const unconfirmedPurchase = pending.get(purchaseKey);
+    input.value = inputGold(unconfirmedPurchase ? JSON.parse(unconfirmedPurchase.fingerprint)[1].event.cost : item.cost);
     input.inputMode = "decimal";
     label.append(input);
     const buy = el("button", "Record purchase");
     buy.type = "submit";
-    buy.disabled = !item.valid;
+    const destinationKey = "destination:" + item.key.join(":");
+    const unconfirmedDestination = pending.get(destinationKey);
+    const draftDestination = unconfirmedDestination ? JSON.parse(unconfirmedDestination.fingerprint)[1].destination : item.destination;
+    const destination = destinationControl(draftDestination, item.candidate.valuation.name);
+    const save = el("button", "Save destination", "secondary"), status = el("p");
+    save.type = "button";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    let saving = false, purchasing = false, verified = true;
+    function updateDestination() {
+      const dirty = destination.select.value !== item.destination;
+      const unconfirmed = pending.has(destinationKey);
+      const purchaseUnconfirmed = pending.has(purchaseKey);
+      input.disabled = purchasing || purchaseUnconfirmed;
+      buy.disabled = purchasing || saving || dirty || unconfirmed || !verified || !item.valid || !configuredDestination(item.destination);
+      save.disabled = purchasing || purchaseUnconfirmed || saving || (!configuredDestination(destination.select.value) && !unconfirmed) || (!dirty && !unconfirmed && verified);
+      destination.select.disabled = purchasing || purchaseUnconfirmed || saving || unconfirmed || !state.settings.selling_realms.length;
+      status.textContent = saving ? "Saving destination…" : unconfirmed ? "Destination save not confirmed. Retry Save destination before purchasing." : !verified ? "Destination saved; eligibility not confirmed. Retry Save destination." : dirty ? "Destination changed. Save destination before recording a purchase." : "Saved destination: " + item.destination;
+    }
+    destination.select.onchange = updateDestination;
+    save.onclick = async () => {
+      if (save.disabled) return;
+      saving = true;
+      updateDestination();
+      try {
+        const updated = await mutation("/api/shopping/destination", {key: item.key, destination: destination.select.value}, destinationKey);
+        if (shoppingRows.get(rowKey) !== controller) return;
+        item.destination = updated.destination;
+        verified = false;
+        const current = (await api("/api/shopping")).find(entry => JSON.stringify(entry.key) === JSON.stringify(item.key));
+        if (!current) throw Error("This selection is no longer available. Reload the shopping list.");
+        if (shoppingRows.get(rowKey) !== controller) return;
+        Object.assign(item, current);
+        eligibility.textContent = item.valid ? "Currently eligible; manually verify in game" : item.validation_error;
+        verified = true;
+        ++shoppingSequence;
+        message("Destination saved.");
+      } catch (error) {
+        message(error.message, true);
+      } finally {
+        saving = false;
+        updateDestination();
+      }
+    };
+    updateDestination();
+    const destinationActions = el("div", undefined, "row-actions");
+    destinationActions.append(destination.label, save);
     form.append(label, buy);
     form.onsubmit = (event) => {
       event.preventDefault();
-      action(buy, async () => {
+      if (buy.disabled) return;
+      purchasing = true;
+      updateDestination();
+      return action(buy, async () => {
         await mutation(
           "/api/ledger",
           {
@@ -586,11 +684,16 @@ async function loadShopping() {
               cost: copper(input.value),
             },
           },
-          "purchase:" + item.key.join(":"),
+          purchaseKey,
         );
+        ++shoppingSequence;
+        shoppingRows.delete(rowKey);
         message("Purchase recorded. Inventory and cash updated.");
         await loadState();
         await loadShopping();
+      }).finally(() => {
+        purchasing = false;
+        updateDestination();
       });
     };
     const remove = el("button", "Remove", "secondary");
@@ -601,11 +704,25 @@ async function loadShopping() {
           { key: item.key },
           "remove:" + item.key.join(":"),
         );
+        ++shoppingSequence;
+        shoppingRows.delete(rowKey);
         message("Selection removed.");
         await loadState();
         await loadShopping();
       });
-    row.append(info, form, remove);
+    const controller = {row, update(current) {
+      const choice = destination.select.value;
+      const refreshed = destinationControl(choice, item.candidate.valuation.name);
+      destination.select.replaceChildren(...refreshed.select.options);
+      destination.select.value = choice;
+      if (!saving && !purchasing) {
+        Object.assign(item, current);
+        eligibility.textContent = item.valid ? "Currently eligible; manually verify in game" : item.validation_error;
+      }
+      updateDestination();
+    }};
+    shoppingRows.set(rowKey, controller);
+    row.append(info, destinationActions, status, form, remove);
     container.append(row);
   }
 }
