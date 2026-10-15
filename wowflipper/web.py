@@ -10,6 +10,7 @@ from .repository import Repository
 from .portfolio import Portfolio
 from .query import MarketQuery, safe
 from .settings import Settings
+from .models import integer
 from .refresh import RefreshService
 from .sources.blizzard import BlizzardClient
 from .demo import import_snapshot
@@ -67,12 +68,22 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
     def resale_overrides(): return jsonify(list(repo.load_resale_overrides().values()))
     @app.post('/api/resale-overrides')
     def set_resale_override():
-        data=body(['item_id','unit_price'])
-        return jsonify(repo.set_resale_override(data['item_id'],data['unit_price']))
+        data=body(['item_id','identity','unit_price'])
+        if ('item_id' in data) == ('identity' in data): raise ValueError('Provide either item_id or pet identity')
+        if 'identity' in data:
+            from .identity import parse_pet_identity
+            parse_pet_identity(data['identity'])
+        else: data['item_id']=integer(data['item_id'],1)
+        return jsonify(repo.set_resale_override(data.get('identity',data.get('item_id')),data['unit_price']))
     @app.post('/api/resale-overrides/remove')
     def remove_resale_override():
-        data=body(['item_id'])
-        repo.remove_resale_override(data['item_id'])
+        data=body(['item_id','identity'])
+        if ('item_id' in data) == ('identity' in data): raise ValueError('Provide either item_id or pet identity')
+        if 'identity' in data:
+            from .identity import parse_pet_identity
+            parse_pet_identity(data['identity'])
+        else: data['item_id']=integer(data['item_id'],1)
+        repo.remove_resale_override(data.get('identity',data.get('item_id')))
         return jsonify(removed=True)
     @app.get('/api/realms')
     def realms(): return jsonify(repo.cache_get('realms') or [])
@@ -120,12 +131,12 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
     @app.get('/api/export')
     def export():
         rows=market().rows(request.args); output=io.StringIO(); writer=csv.writer(output)
-        writer.writerow(['Item','Item ID','Auction ID','Source realms','Quantity','Total buyout copper','Unit buyout copper','Assumed unit resale copper','Estimated net proceeds copper','Estimated profit copper','ROI','Regional sale rate','Regional sold per day','Market value copper','Historical copper','Auction source time','Valuation source time','Snapshot provenance','Mode','Auction cut','Extra costs copper','Resale factor','Minimum discount','Minimum profit copper','Minimum ROI','Minimum sale rate','Minimum sold per day','Maximum copies','Maximum auction age hours','Maximum valuation age hours','Destination evidence','Assumptions and risks','Original TSM average sale price copper','Resale price source','Override updated at'])
+        writer.writerow(['Item','Item ID','Auction ID','Source realms','Quantity','Total buyout copper','Unit buyout copper','Assumed unit resale copper','Estimated net proceeds copper','Estimated profit copper','ROI','Regional sale rate','Regional sold per day','Market value copper','Historical copper','Auction source time','Valuation source time','Snapshot provenance','Mode','Auction cut','Extra costs copper','Resale factor','Minimum discount','Minimum profit copper','Minimum ROI','Minimum sale rate','Minimum sold per day','Maximum copies','Maximum auction age hours','Maximum valuation age hours','Destination evidence','Assumptions and risks','Original TSM average sale price copper','Resale price source','Override updated at','Market identity','Pet species ID','Pet level','Pet quality','Pet breed ID','Price limitations'])
         def text(value):
             value=str(value)
             return "'"+value if value.lstrip().startswith(('=','+','-','@','\t','\r')) else value
         for row in rows:
             a=row['auction']; v=row['valuation']
-            writer.writerow([text(v['name']),a['item_id'],a['auction_id'],text(', '.join(row['source_realms'])),a['quantity'],a['buyout'],Decimal(a['buyout'])/a['quantity'],row['assumed_unit_resale'],row['proceeds'],row['profit'],row['roi'],v['sale_rate'],v['sold_per_day'],v['market_value'],v['historical'],text(a['source_time']),text(v['updated_at']),text(a['provenance']),text('Offline '+row['mode'] if row['mode'].startswith('offline') else row['mode']),market().settings.auction_cut,market().settings.extra_costs,market().settings.resale_factor,market().settings.discount,market().settings.min_profit,market().settings.min_roi,market().settings.min_sale_rate,market().settings.min_sold_per_day,market().settings.max_copies,market().settings.max_auction_age_hours,market().settings.max_tsm_age_hours,text(json.dumps(row['comparisons'],separators=(',',':'))),text('Regional demand only; manual verification required; '+row['explanation']+'; '+', '.join(row['risks'])),v['avg_sale_price'],'manual_override' if row['resale_override'] else 'tsm_resale_factor',text(row['resale_override']['updated_at']) if row['resale_override'] else ''])
+            writer.writerow([text(v['name']),a['item_id'],a['auction_id'],text(', '.join(row['source_realms'])),a['quantity'],a['buyout'],Decimal(a['buyout'])/a['quantity'],row['assumed_unit_resale'],row['proceeds'],row['profit'],row['roi'],v['sale_rate'],v['sold_per_day'],v['market_value'],v['historical'],text(a['source_time']),text(v['updated_at']),text(a['provenance']),text('Offline '+row['mode'] if row['mode'].startswith('offline') else row['mode']),market().settings.auction_cut,market().settings.extra_costs,market().settings.resale_factor,market().settings.discount,market().settings.min_profit,market().settings.min_roi,market().settings.min_sale_rate,market().settings.min_sold_per_day,market().settings.max_copies,market().settings.max_auction_age_hours,market().settings.max_tsm_age_hours,text(json.dumps(row['comparisons'],separators=(',',':'))),text('Regional demand only; manual verification required; '+row['explanation']+'; '+', '.join(row['risks'])),v['avg_sale_price'],'manual_override' if row['resale_override'] else 'tsm_resale_factor',text(row['resale_override']['updated_at']) if row['resale_override'] else '',row['identity'],(row['pet'] or {}).get('species_id',''),(row['pet'] or {}).get('level',''),(row['pet'] or {}).get('quality',''),(row['pet'] or {}).get('breed_id',''),text('Species aggregate valuation across levels, qualities and breeds; no level-specific premium' if row['pet'] else 'Regional item valuation')])
         return Response(output.getvalue(),mimetype='text/csv',headers={'Content-Disposition':'attachment; filename=wowflipper-visible.csv'})
     return app

@@ -11,10 +11,11 @@ class ParseReport:
     records: list[Valuation]
     rejected_rows: int
 
-def parse_region_report(text: str) -> ParseReport:
+def _parse_report(text: str, pet=False) -> ParseReport:
+    required = tuple('petSpeciesId' if key == 'itemId' and pet else key for key in REQUIRED)
     reader = csv.DictReader(io.StringIO(text.lstrip('\ufeff')))
     headers = reader.fieldnames or []
-    if not set(REQUIRED).issubset(headers) or len(headers) != len(set(headers)):
+    if not set(required).issubset(headers) or len(headers) != len(set(headers)):
         raise ValueError('Missing or duplicate regional CSV headers')
     records = {}
     counts = {}
@@ -22,15 +23,16 @@ def parse_region_report(text: str) -> ParseReport:
     rejected = 0
     for row in reader:
         try:
-            if None in row or any(row.get(key) is None for key in REQUIRED):
+            if None in row or any(row.get(key) is None for key in required):
                 raise ValueError('Malformed row')
-            record = Valuation(integer(row['itemId'],1), row['name'],
+            record = Valuation(82800 if pet else integer(row['itemId'],1), row['name'],
                                integer(row['avgSalePrice']), decimal(row['saleRate'],1),
                                decimal(row['soldPerDay']), integer(row['marketValue']),
-                               integer(row['historical']), timestamp(row['updatedAt']))
+                               integer(row['historical']), timestamp(row['updatedAt']),
+                               **({'pet_species_id':integer(row['petSpeciesId'],1)} if pet else {}))
             if not record.name.strip():
                 raise ValueError('Missing name')
-            item = record.item_id
+            item = record.pet_species_id if pet else record.item_id
             counts[item] = counts.get(item,0) + 1
             if item in conflicts:
                 rejected += 1
@@ -44,6 +46,15 @@ def parse_region_report(text: str) -> ParseReport:
             rejected += 1
     return ParseReport(list(records.values()), rejected)
 
+def parse_region_report(text: str) -> ParseReport:
+    return _parse_report(text)
+
+def parse_pet_report(text: str) -> ParseReport:
+    return _parse_report(text, pet=True)
+
+def parse_pets(text: str) -> list[Valuation]:
+    return parse_pet_report(text).records
+
 def parse_region(text: str) -> list[Valuation]:
     return parse_region_report(text).records
 
@@ -55,21 +66,25 @@ class TSMClient:
         from .http import HTTPClient
         self.http=http or HTTPClient()
     def region(self,previous=None):
+        return self._region(previous, pet=False)
+    def pets(self,previous=None):
+        return self._region(previous, pet=True)
+    def _region(self,previous=None,pet=False):
         from datetime import datetime, timezone
         from dataclasses import replace
         from ..models import Snapshot
         from .http import http_status_error
         headers={'If-Modified-Since':previous.http_last_modified} if previous and previous.http_last_modified else {}
-        response=self.http.request('GET',self.URL,headers)
+        response=self.http.request('GET',self.URL.replace('/items.csv','/pets.csv') if pet else self.URL,headers)
         now=datetime.now(timezone.utc)
         if response.status==304:
             if previous is None: raise ValueError('304 without prior TSM snapshot')
             return replace(previous,fetched_at=now)
         if response.status!=200: raise http_status_error(response.status)
-        try: report=parse_region_report(response.body.decode('utf-8-sig'))
+        try: report=(parse_pet_report if pet else parse_region_report)(response.body.decode('utf-8-sig'))
         except UnicodeError: raise ValueError('Invalid TSM text encoding') from None
         if not report.records: raise ValueError('Invalid TSM regional rows')
         times={record.updated_at for record in report.records}
         if len(times)!=1: raise ValueError('Inconsistent TSM scan timestamps')
         modified=next((v for k,v in response.headers.items() if k.lower()=='last-modified'),None)
-        return Snapshot('tsm:us',next(iter(times)),now,modified,'tsm',tuple(report.records),raw_payload=response.body,source_metadata={'accepted_rows':len(report.records),'rejected_rows':report.rejected_rows})
+        return Snapshot('tsm-pets:us' if pet else 'tsm:us',next(iter(times)),now,modified,'tsm',tuple(report.records),raw_payload=response.body,source_metadata={'accepted_rows':len(report.records),'rejected_rows':report.rejected_rows})

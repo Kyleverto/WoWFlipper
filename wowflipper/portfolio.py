@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from .repository import encode
 from .models import integer
 from .engine import evaluate
+from .identity import pet_details, market_key, override_key
 
 # Historical labels remain accepted for immutable event replay and corrections.
 STRATEGIES = {'general', 'stronger-demand', 'longer-term'}
@@ -150,26 +151,43 @@ class Portfolio:
         if candidate is None or list(candidate.key) != selection['key']:
             raise ValueError('Selection is stale: auction no longer actionable')
         candidate = evaluate(candidate.auction, candidate.valuation, settings, datetime.now(timezone.utc),
-                             self.repository.load_resale_overrides(db).get(candidate.auction.item_id))
+                             self.repository.load_resale_overrides(db).get(override_key(candidate.auction)))
         if candidate is None:
             raise ValueError('Selection is stale or excluded by current settings')
         if selection['destination'] not in settings.selling_realms:
             raise ValueError('Selling realm is no longer configured')
+        original=selection.get('candidate',{}).get('auction',{})
+        if candidate.auction.item_id == 82800:
+            from .models import Auction
+            try: original_identity=market_key(Auction(**original))
+            except (TypeError,ValueError): original_identity=None
+            if original_identity != market_key(candidate.auction):
+                raise ValueError('Listing identity changed; remove and select again')
         if candidate.auction.buyout != selection['cost'] or candidate.auction.quantity != selection['quantity'] or candidate.auction.item_id != selection['item_id']:
             raise ValueError('Listing changed; remove and select again')
         return candidate
 
+    @staticmethod
+    def _exposure_key(record):
+        raw=record.get('candidate',{}).get('auction',{})
+        if record.get('item_id') == 82800 and raw:
+            from .models import Auction
+            try: pet=pet_details(Auction(**raw))
+            except (ValueError,TypeError): pet=None
+            if pet: return ('pet',pet['species_id'])
+        return ('item',record['item_id'])
+
     def _limits(self, state, selections, settings):
         costs, copies = {}, {}
         for lot in state['inventory']:
-            item = lot['item_id']
+            item = self._exposure_key(lot)
             costs[item] = costs.get(item, 0) + lot['remaining_cost']
             copies[item] = copies.get(item, 0) + lot['remaining_quantity']
         committed = 0
         for selection in selections:
             if serialize(selection['key']) in state['purchased_keys']:
                 raise ValueError('Auction already purchased')
-            item = selection['item_id']
+            item = self._exposure_key(selection)
             costs[item] = costs.get(item, 0) + selection['cost']
             copies[item] = copies.get(item, 0) + selection['quantity']
             committed += selection['cost']

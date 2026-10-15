@@ -26,7 +26,7 @@ class Settings:
     region: str = 'us'
     buying_realms: tuple = ('agamaggan',)
     selling_realms: tuple = ()
-    categories: tuple = ('recipe', 'mount', 'toy')
+    categories: tuple = ('recipe', 'mount', 'toy', 'decor', 'battle-pet')
 
     @classmethod
     def from_dict(cls, data: dict):
@@ -45,7 +45,7 @@ class Settings:
                 if not isinstance(value,(list,tuple)) or any(not isinstance(x,str) or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*',x) for x in value):
                     raise ValueError('Expected realm slugs or category names')
                 value=tuple(dict.fromkeys(value))
-                if field.name=='categories' and set(value)-{'recipe','mount','toy'}: raise ValueError('Unsupported category')
+                if field.name=='categories' and set(value)-{'recipe','mount','toy','decor','battle-pet'}: raise ValueError('Unsupported category')
             elif not isinstance(value, str) or not value.strip():
                 raise ValueError('Expected nonempty text')
             values[field.name] = value

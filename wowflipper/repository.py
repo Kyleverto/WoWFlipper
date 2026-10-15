@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from .models import Snapshot, Auction, Valuation, integer, timestamp, decimal
 from .settings import Settings
+from .identity import parse_pet_identity
 
 def encode(value):
     if isinstance(value,(datetime,Decimal)): return str(value)
@@ -38,6 +39,9 @@ class Repository:
                 decimal(record.sale_rate,1); decimal(record.sold_per_day)
                 if not isinstance(record.name,str) or not record.name.strip(): raise ValueError('Invalid valuation name')
                 timestamp(record.updated_at)
+                if record.pet_species_id is not None:
+                    integer(record.pet_species_id,1)
+                    if record.item_id != 82800: raise ValueError('Pet valuation requires Pet Cage item ID')
         if snapshot.records and any(type(r)!=type(snapshot.records[0]) for r in snapshot.records): raise ValueError('Mixed records')
         data=asdict(snapshot); data.pop('raw_payload'); data.pop('id')
         data['record_type']='auction' if snapshot.records and isinstance(snapshot.records[0],Auction) else 'valuation'
@@ -120,16 +124,23 @@ class Repository:
         else:
             row=db.execute("SELECT data FROM cache WHERE key='resale_overrides'").fetchone()
             entry=json.loads(row[0]) if row else {}
-        return {int(key): value for key,value in entry.get('items',{}).items()}
+        return {key if key.startswith('pet:') else int(key): value for key,value in entry.get('items',{}).items()}
 
     def set_resale_override(self, item_id, unit_price):
-        item_id=integer(item_id,1); unit_price=integer(unit_price,1)
-        value={'item_id':item_id,'unit_price':unit_price,'updated_at':datetime.now(timezone.utc).isoformat()}
+        unit_price=integer(unit_price,1)
+        if isinstance(item_id,str) and item_id.startswith('pet:'):
+            pet=parse_pet_identity(item_id)
+            value={'identity':item_id,'pet':pet,'unit_price':unit_price,'updated_at':datetime.now(timezone.utc).isoformat()}
+        else:
+            item_id=integer(item_id,1)
+            value={'item_id':item_id,'unit_price':unit_price,'updated_at':datetime.now(timezone.utc).isoformat()}
         self._change_resale_override(item_id,value)
         return value
 
     def remove_resale_override(self, item_id):
-        self._change_resale_override(integer(item_id,1),None)
+        if isinstance(item_id,str) and item_id.startswith('pet:'): parse_pet_identity(item_id)
+        else: item_id=integer(item_id,1)
+        self._change_resale_override(item_id,None)
 
     def _change_resale_override(self,item_id,value):
         with self.connect() as db:

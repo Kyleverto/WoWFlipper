@@ -54,6 +54,7 @@ class Valuation:
     market_value: int
     historical: int
     updated_at: datetime
+    pet_species_id: int | None = None
 
 @dataclass(frozen=True)
 class Auction:

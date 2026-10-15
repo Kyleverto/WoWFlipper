@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 import json
 from .repository import encode
 from .models import is_fresh
+from .identity import pet_details, market_key, override_key
 from .engine import evaluate, exclusion_reason, rank, compare_destinations, index_destinations
 
 def safe(value):
@@ -35,9 +36,9 @@ class MarketQuery:
     def _valid_until(self):
         deadlines=[]
         times=[(s.source_time,self.settings.max_auction_age_hours) for s in self.snapshots.values() if s]
-        if self.tsm:
-            times.append((self.tsm.source_time,self.settings.max_tsm_age_hours))
-            times.extend((v.updated_at,self.settings.max_tsm_age_hours) for v in self.values.values())
+        for snapshot in (self.tsm,self.pet_tsm):
+            if snapshot: times.append((snapshot.source_time,self.settings.max_tsm_age_hours))
+        times.extend((v.updated_at,self.settings.max_tsm_age_hours) for v in (*self.values.values(),*self.pet_values.values()))
         for source_time,hours in times:
             if source_time is None: continue
             try:
@@ -60,7 +61,9 @@ class MarketQuery:
         self.realms=repo.cache_get('realms') or []
         self.mapping={r['slug']:r['house_id'] for r in self.realms}
         self.tsm=repo.latest('tsm:us',include_payload=False)
-        self.values={v.item_id:v for v in self.tsm.records} if self.tsm else {}
+        self.pet_tsm=repo.latest('tsm-pets:us',include_payload=False)
+        self.values={v.item_id:v for v in self.tsm.records if v.pet_species_id is None} if self.tsm else {}
+        self.pet_values={v.pet_species_id:v for v in self.pet_tsm.records if v.pet_species_id is not None} if self.pet_tsm else {}
         self.snapshots={}
         self.candidates={}; self.exclusions=[]
         selected=set(self.settings.buying_realms)|set(self.settings.selling_realms)
@@ -71,23 +74,31 @@ class MarketQuery:
         self.destination_snapshots={s:self.snapshots.get(self.mapping.get(s)) for s in self.settings.selling_realms}
         self.destination_index=index_destinations(self.destination_snapshots)
         buy_houses={self.mapping[s] for s in self.settings.buying_realms if s in self.mapping}
-        valuation_fresh=bool(self.tsm and is_fresh(self.tsm.source_time,self.settings.max_tsm_age_hours,self.now))
         for house in sorted(buy_houses):
             snapshot=self.snapshots.get(house)
             if not snapshot: continue
-            provenance=json.dumps({'auction_snapshot':snapshot.id,'auction_hash':snapshot.content_hash,'auction_source_time':str(snapshot.source_time),'valuation_snapshot':self.tsm.id if self.tsm else None,'valuation_hash':self.tsm.content_hash if self.tsm else None,'valuation_source_time':str(self.tsm.source_time) if self.tsm else None,'valuation_mode':self.tsm.mode if self.tsm else None,'mode':snapshot.mode},sort_keys=True)
+            provenance_by_kind={}
+            fresh_by_kind={}
+            for kind,valuation_snapshot in ((False,self.tsm),(True,self.pet_tsm)):
+                fresh_by_kind[kind]=bool(valuation_snapshot and is_fresh(valuation_snapshot.source_time,self.settings.max_tsm_age_hours,self.now))
+                provenance_by_kind[kind]=json.dumps({'auction_snapshot':snapshot.id,'auction_hash':snapshot.content_hash,'auction_source_time':str(snapshot.source_time),'valuation_snapshot':valuation_snapshot.id if valuation_snapshot else None,'valuation_hash':valuation_snapshot.content_hash if valuation_snapshot else None,'valuation_source_time':str(valuation_snapshot.source_time) if valuation_snapshot else None,'valuation_mode':valuation_snapshot.mode if valuation_snapshot else None,'mode':snapshot.mode},sort_keys=True)
             for auction in snapshot.records:
+                pet=pet_details(auction)
+                valuation_fresh=fresh_by_kind[bool(pet)]
+                provenance=provenance_by_kind[bool(pet)]
                 auction=replace(auction,source_time=snapshot.source_time)
-                value=self.values.get(auction.item_id)
-                candidate=evaluate(auction,value,self.settings,self.now,self.resale_overrides.get(auction.item_id)) if value and valuation_fresh else None
+                value=self.pet_values.get(pet['species_id']) if pet else self.values.get(auction.item_id)
+                candidate=evaluate(auction,value,self.settings,self.now,self.resale_overrides.get(override_key(auction))) if value and valuation_fresh else None
                 key=(auction.region,house,auction.auction_id)
                 if candidate:
                     self.candidates[key]=replace(candidate,auction=replace(auction,provenance=provenance))
-                else: self.exclusions.append({'key':key,'item_id':auction.item_id,'name':value.name if value else f'Item {auction.item_id}','reason':('stale_or_unknown_valuation_source' if value and not valuation_fresh else exclusion_reason(auction,value,self.settings,self.now,self.resale_overrides.get(auction.item_id))) if value else 'missing-valuation'})
+                else: self.exclusions.append({'key':key,'item_id':auction.item_id,'name':value.name if value else f'Item {auction.item_id}','reason':('stale_or_unknown_valuation_source' if value and not valuation_fresh else exclusion_reason(auction,value,self.settings,self.now,self.resale_overrides.get(override_key(auction)))) if value else 'missing-valuation'})
     def candidate(self,key): return self.candidates.get(tuple(key))
     def _ordered(self,args):
         query=args.get('q','').casefold().strip()
         candidates=[c for c in rank(self.candidates.values()) if query in c.valuation.name.casefold() or query in str(c.auction.item_id)]
+        category=args.get('category','')
+        if category and category != 'all': candidates=[c for c in candidates if c.auction.category==category]
         sort=args.get('sort','profit'); direction=args.get('direction','desc')
         sorts={'name':lambda c:c.valuation.name.casefold(),'cost':lambda c:c.auction.buyout,'profit':lambda c:c.profit,'roi':lambda c:c.roi,'quantity':lambda c:c.auction.quantity,'sale_rate':lambda c:c.valuation.sale_rate,'sold_per_day':lambda c:c.valuation.sold_per_day}
         if sort=='ranking': sort='profit'  # Legacy query compatibility.
@@ -117,10 +128,13 @@ class MarketQuery:
         rows=[]
         for candidate in candidates:
             row=safe(asdict(candidate))
+            row['identity']=market_key(candidate.auction)
+            row['pet']=pet_details(candidate.auction)
             row['comparisons']=safe(compare_destinations(candidate,self.destination_snapshots,self.settings,self.now,self.destination_index))
             row['source_realms']=[r['slug'] for r in self.realms if r['house_id']==candidate.auction.house_id]
             row['mode']=self.snapshots[candidate.auction.house_id].mode
-            if self.tsm.mode.startswith('offline') and not row['mode'].startswith('offline'): row['mode']='offline-mixed'
+            valuation_snapshot=self.pet_tsm if row['pet'] else self.tsm
+            if valuation_snapshot.mode.startswith('offline') and not row['mode'].startswith('offline'): row['mode']='offline-mixed'
             for comparison in row['comparisons']:
                 snapshot=self.destination_snapshots.get(comparison['realm'])
                 comparison['mode']=snapshot.mode if snapshot else 'missing'

@@ -85,6 +85,7 @@ class BlizzardClient:
         class_id=data.get('item_class',{}).get('id'); subclass=data.get('item_subclass',{}).get('id')
         if class_id==9: category='recipe'
         elif class_id==15 and subclass==5: category='mount'
+        elif class_id==20 and subclass==0: category='decor'
         # The item endpoint does not reliably establish toy membership or tradeability.
         binding=data.get('binding',{}).get('type')
         return {**data,'category':category,'tradeability':False if binding=='ON_ACQUIRE' else True if binding in {'ON_EQUIP','ON_USE'} else None}
@@ -119,19 +120,52 @@ class BlizzardClient:
             if record is not None: records.append(replace(record,source_time=source_time))
         return Snapshot(f'auctions:us:{house_id}',source_time,now,modified,'blizzard',tuple(records),raw_payload=response.body)
 
+    def pet(self,species_id):
+        species_id=integer(species_id,1)
+        data=self._json(self._get(f'/data/wow/pet/{species_id}',static=True))
+        if data.get('id') != species_id or not isinstance(data.get('name'),str) or not data['name'].strip():
+            raise ValueError('Invalid pet species metadata')
+        if not isinstance(data.get('is_tradable'),bool) or not isinstance(data.get('is_battlepet'),bool):
+            raise ValueError('Invalid pet species tradeability')
+        return {**data,'category':'battle-pet','tradeability':data['is_tradable'] and data['is_battlepet']}
+
     def toy_items(self,repository,limit=50):
-        """Incrementally resolve toy IDs through their item links, never equate IDs."""
-        state=repository.cache_fresh('toys:us',7*86400)
-        if state is None:
-            data=self._json(self._get('/data/wow/toy/index',static=True))
-            if not isinstance(data.get('toys'),list): raise ValueError('Invalid toy index')
-            state={'items':[],'remaining':[integer(toy['id'],1) for toy in data['toys']]}
-            repository.cache_timed('toys:us',state)
-        for toy_id in state['remaining'][:limit]:
-            data=self._json(self._get(f'/data/wow/toy/{toy_id}',static=True))
-            try: item_id=integer(data['item']['id'],1)
-            except (KeyError,TypeError,ValueError): raise ValueError('Invalid toy item link') from None
+        return self._collectible_items(repository,'toy','toys','item',limit)
+
+    def decor_items(self,repository,limit=50):
+        # Decor IDs are collection identifiers. Only the plural items object in
+        # a decor detail establishes which auction item belongs to the index.
+        return self._collectible_items(repository,'decor','decor_items','items',limit)
+
+    def _collectible_items(self,repository,kind,index_field,item_field,limit):
+        key=f'{"toys" if kind == "toy" else "decor"}:us'
+        legacy=repository.cache_get('timed:'+key) or {}
+        state=repository.cache_get(key) or legacy.get('value')
+        fresh=repository.cache_fresh(key+':index',7*86400)
+        if fresh is None:
+            data=self._json(self._get(f'/data/wow/{kind}/index',static=True))
+            entries=data.get(index_field)
+            if not isinstance(entries,list): raise ValueError(f'Invalid {kind} index')
+            try: ids=sorted({integer(entry['id'],1) for entry in entries})
+            except (KeyError,TypeError,ValueError): raise ValueError(f'Invalid {kind} index') from None
+            state=state or {'items':[],'remaining':[],'resolved':{}}
+            resolved=state.get('resolved',{})
+            state={**state,'remaining':[identity for identity in ids if str(identity) not in resolved]}
+            repository.cache_put(key,state)
+            repository.cache_timed(key+':index',{'ids':ids})
+        state=state or {'items':[],'remaining':[],'resolved':{}}
+        fetched=0
+        for identity in state['remaining'][:max(0,min(integer(limit),50))]:
+            data=self._json(self._get(f'/data/wow/{kind}/{identity}',static=True))
+            try: item_id=integer(data[item_field]['id'],1)
+            except (KeyError,TypeError,ValueError): raise ValueError(f'Invalid {kind} item link') from None
             state['items']=sorted(set(state['items'])|{item_id})
-            state['remaining'].remove(toy_id)
-            repository.cache_timed('toys:us',state)
-        return {'items':state['items'],'pending':len(state['remaining'])}
+            state.setdefault('resolved',{})[str(identity)]=item_id
+            state['remaining'].remove(identity)
+            repository.cache_put(key,state)
+            repository.cache_timed(key,state)
+            fetched+=1
+        # Preserve the legacy toy return shape for existing adapter callers.
+        result={'items':state['items'],'pending':len(state['remaining'])}
+        if kind == 'decor': result['details_fetched']=fetched
+        return result

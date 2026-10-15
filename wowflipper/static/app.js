@@ -157,6 +157,7 @@ async function action(button, work) {
 function params() {
   return new URLSearchParams({
     q: $("search").value,
+    category: $("category").value,
     sort: $("sort").value,
     direction: $("direction").value,
     page: resultsPage,
@@ -286,6 +287,8 @@ function renderSources() {
     if (source === "realms:us") return "United States realm discovery";
     if (source === "tsm:us") return "Regional valuations";
     if (source === "toys:us") return "Toy classification";
+    if (source === "decor:us") return "Housing decor classification";
+    if (source === "tsm-pets:us") return "Battle pet regional valuations (species aggregate)";
     if (source.startsWith("auctions:us:")) {
       const house = Number(source.split(":")[2]);
       const names = (state.realms || []).filter(realm => realm.house_id === house)
@@ -302,7 +305,7 @@ function renderSources() {
     target.append(
       el(
         "p",
-        `${sourceLabel(source)}: ${status.state}${detail ? ` — ${detail}${httpStatus}` : ""}${status.metadata_skipped ? " • Metadata limit reached; refresh again to enrich remaining items." : ""}`,
+        `${sourceLabel(source)}: ${status.state}${detail ? ` — ${detail}${httpStatus}` : ""}${status.metadata_skipped ? " • Metadata limit reached; refresh again to enrich remaining items." : ""}${status.pending ? ` • ${status.pending} classification lookups pending; refresh again to continue.` : ""}${status.using_cached_items ? " • Retained known classifications; new membership remains unverified." : ""}`,
       ),
     );
   }
@@ -469,7 +472,7 @@ function renderResults() {
       tr = el("tr");
     let td = addCell(tr, "");
     td.append(
-      el("strong", v.name),
+      el("strong", candidateName(row)),
       el(
         "small",
         `${a.item_id} • ${row.source_realms.join(", ")} • ${a.category}`,
@@ -485,9 +488,10 @@ function renderResults() {
     addCell(tr, gold(row.proceeds));
     addCell(tr, gold(row.profit), "positive");
     addCell(tr, (Number(row.roi) * 100).toFixed(1) + "%");
-    addCell(tr, (Number(v.sale_rate) * 100).toFixed(1) + "%");
-    addCell(tr, v.sold_per_day);
-    addCell(tr, `${gold(v.market_value)} / ${gold(v.historical)}`);
+    const rateCell = addCell(tr, (Number(v.sale_rate) * 100).toFixed(1) + "%");
+    const soldCell = addCell(tr, v.sold_per_day);
+    const marketCell = addCell(tr, `${gold(v.market_value)} / ${gold(v.historical)}`);
+    if (petVariant(row)) for (const cell of [rateCell, soldCell, marketCell]) cell.append(el("small", "Species aggregate"));
     addCell(
       tr,
       `${age(a.source_time)} auctions / ${age(v.updated_at)} valuation`,
@@ -518,6 +522,7 @@ function renderResults() {
     const detail = addCell(details, "");
     detail.colSpan = 12;
     detail.append(
+      el("p", candidateName(row)),
       el("p", row.explanation),
       el(
         "p",
@@ -655,7 +660,7 @@ async function loadShopping() {
     updateSource();
     const eligibility = el("p", item.valid ? "Currently eligible; manually verify in game" : item.validation_error, "caution");
     info.append(
-      el("strong", item.candidate.valuation.name),
+      el("strong", candidateName(item.candidate)),
       el(
         "p",
         `${item.quantity} units • ${gold(item.cost)} quoted`,
@@ -676,7 +681,7 @@ async function loadShopping() {
     const destinationKey = "destination:" + item.key.join(":");
     const unconfirmedDestination = pending.get(destinationKey);
     const draftDestination = unconfirmedDestination ? JSON.parse(unconfirmedDestination.fingerprint)[1].destination : item.destination;
-    const destination = destinationControl(draftDestination, item.candidate.valuation.name);
+    const destination = destinationControl(draftDestination, candidateName(item.candidate));
     const save = el("button", "Save destination", "secondary"), status = el("p");
     save.type = "button";
     status.setAttribute("role", "status");
@@ -770,7 +775,7 @@ async function loadShopping() {
       updateDestination();
     }, update(current) {
       const choice = destination.select.value;
-      const refreshed = destinationControl(choice, item.candidate.valuation.name);
+      const refreshed = destinationControl(choice, candidateName(item.candidate));
       destination.select.replaceChildren(...refreshed.select.options);
       destination.select.value = choice;
       if (!saving && !purchasing) {
@@ -839,7 +844,7 @@ function renderInventory() {
   for (const controller of inventoryRows.values()) {
     const lot = controller.lot;
     controller.row.hidden = !(pending.has(`inventory:${lot.id}`) || controller.busy) && (
-      !`${lot.candidate.valuation.name} ${lot.candidate.auction.item_id} #${lot.id}`.toLowerCase().includes(query) ||
+      !`${candidateName(lot.candidate)} ${lot.candidate.auction.item_id} #${lot.id}`.toLowerCase().includes(query) ||
       (!!$("inventory-status").value && (lot.status || "held") !== $("inventory-status").value) ||
       (!!$("inventory-destination").value && lot.destination !== $("inventory-destination").value));
     if (!controller.row.hidden) visible++;
@@ -889,7 +894,7 @@ function inventoryController(initial) {
   };
   controller.update = lot => {
     controller.lot = lot; controller.missing = false;
-    identity.replaceChildren(el("strong", lot.candidate.valuation.name), el("small", `#${lot.id} • Item ${lot.candidate.auction.item_id}`));
+    identity.replaceChildren(el("strong", candidateName(lot.candidate)), el("small", `#${lot.id} • Item ${lot.candidate.auction.item_id}`));
     basis.replaceChildren(el("strong", `${lot.remaining_quantity} units held`), el("small", `Paid ${gold(lot.cost)} • Remaining basis ${gold(lot.remaining_cost)}`));
     source.replaceChildren(el("span", buyingRealmNames(lot.key[1])), el("small", `Connected auction house ${lot.key[1]}`));
     const purchased = lot.recorded_at, days = Math.max(0, Math.floor((Date.now() - Date.parse(purchased)) / 86400000));
@@ -961,7 +966,7 @@ function renderLedger() {
     const held = inventory.find((i) => i.id === lot.id);
     $("purchase-id").append(
       new Option(
-        `#${lot.id} ${lot.candidate.valuation.name} (${held ? held.remaining_quantity : 0} units held)`,
+        `#${lot.id} ${candidateName(lot.candidate)} (${held ? held.remaining_quantity : 0} units held)`,
         lot.id,
       ),
     );
@@ -1028,16 +1033,46 @@ function field(container, id, label, value, type = "text") {
   container.append(node);
   return input;
 }
+// Archived shopping and inventory candidates predate the additive result fields.
+function petVariant(row) {
+  if (row.pet) return row.pet;
+  const auction = row.auction || {};
+  if (auction.metadata?.pet) return auction.metadata.pet;
+  try {
+    const variant = typeof auction.variant_key === "string" ? JSON.parse(auction.variant_key) : auction.variant_key;
+    if (variant?.pet_species_id) return {species_id: variant.pet_species_id, level: variant.pet_level, quality: variant.pet_quality_id, breed_id: variant.pet_breed_id};
+  } catch (_) { /* Legacy uncertain variants stay ordinary inspection evidence. */ }
+  return null;
+}
+function candidateIdentity(row) {
+  const pet = petVariant(row);
+  return pet ? `pet:${pet.species_id}:${pet.level}:${pet.quality}:${pet.breed_id}` : `item:${row.auction.item_id}`;
+}
+function petLabel(pet) {
+  const quality = ["Poor", "Common", "Uncommon", "Rare", "Epic", "Legendary"][pet.quality] || `Quality ${pet.quality}`;
+  return `Species ${pet.species_id} • Level ${pet.level} • ${quality} • Breed ${pet.breed_id}`;
+}
+function candidateName(row) {
+  const pet = petVariant(row);
+  return row.valuation.name + (pet ? ` • ${petLabel(pet)}` : "");
+}
+function overrideTarget(row) {
+  return petVariant(row) ? candidateIdentity(row) : row.auction.item_id;
+}
+function overrideDraftKey(target) {
+  return String(target).startsWith("pet:") ? String(target) : `item:${target}`;
+}
 function effectiveResale(row) {
   return row.assumed_unit_resale ?? row.valuation.avg_sale_price * Number(state.settings.resale_factor);
 }
 async function saveResaleOverride(itemId, value, clear = false) {
   if (resaleSaving) throw Error("A resale override is being saved. Wait before changing another item.");
   const rawId = String(itemId).trim();
+  const isPet = /^pet:[1-9]\d*:(?:[1-9]|1\d|2[0-5]):[0-5]:[1-9]\d*$/.test(rawId) && rawId.slice(4).split(":").every(part => Number.isSafeInteger(Number(part)));
   const id = Number(rawId);
-  if (!/^\d+$/.test(rawId) || !Number.isSafeInteger(id) || id <= 0)
-    throw Error("Enter a positive whole item ID within supported bounds");
-  const payload = {item_id: id};
+  if (!isPet && (!/^\d+$/.test(rawId) || !Number.isSafeInteger(id) || id <= 0))
+    throw Error("Enter a positive whole item ID or exact pet identity (pet:species:level:quality:breed)");
+  const payload = isPet ? {identity: rawId} : {item_id: id};
   if (!clear) {
     payload.unit_price = copper(value);
     if (payload.unit_price <= 0) throw Error("Unit resale must be greater than zero");
@@ -1061,11 +1096,11 @@ async function saveResaleOverride(itemId, value, clear = false) {
       ++resaleGeneration;
       ++shoppingSequence;
     }
-    resaleDrafts.delete(id);
+    resaleDrafts.delete(overrideDraftKey(itemId));
     await loadState();
     renderResaleOverrides();
     await Promise.all([loadResults(true), loadShopping()]);
-    message(clear ? "Resale override cleared. Current estimates refreshed." : "Resale override saved for this item across all realms. Current estimates refreshed.");
+    message(clear ? "Resale override cleared. Current estimates refreshed." : isPet ? "Resale override saved for this exact pet variant across all realms. Current estimates refreshed." : "Resale override saved for this item across all realms. Current estimates refreshed.");
   } finally {
     resaleSaving = false;
   }
@@ -1074,8 +1109,8 @@ function resaleEditor(itemId, price, hasOverride) {
   const form = el("form", undefined, "row-actions");
   const label = el("label", "Unit resale (gold)"), input = el("input");
   input.inputMode = "decimal";
-  input.value = resaleDrafts.get(itemId) ?? inputGold(price);
-  input.oninput = () => resaleDrafts.set(itemId, input.value);
+  input.value = resaleDrafts.get(overrideDraftKey(itemId)) ?? inputGold(price);
+  input.oninput = () => resaleDrafts.set(overrideDraftKey(itemId), input.value);
   label.append(input);
   const save = el("button", "Save override"), clear = el("button", "Clear override", "secondary"), status = el("span");
   save.type = "submit";
@@ -1085,7 +1120,7 @@ function resaleEditor(itemId, price, hasOverride) {
   const perform = async removing => {
     if (busy || resaleSaving) return;
     busy = true;
-    resaleDrafts.set(itemId, input.value);
+    resaleDrafts.set(overrideDraftKey(itemId), input.value);
     input.disabled = save.disabled = clear.disabled = true;
     status.textContent = "Saving…";
     try {
@@ -1114,8 +1149,8 @@ function resaleVerification(row) {
     el("p", `Global resale factor: ${Number(state.settings.resale_factor) * 100}%`),
     el("p", `Effective unit resale: ${gold(effectiveResale(row))}`),
     el("p", override ? `Source: manual override • Saved ${override.updated_at} (${age(override.updated_at)})` : "Source: TSM average sale price × global resale factor"),
-    el("p", "A manual override sets the final unit resale for this item across all realms until cleared. Source freshness and demand still apply."),
-    resaleEditor(row.auction.item_id, effectiveResale(row), !!override),
+    el("p", petVariant(row) ? "TSM price and demand statistics are species aggregate, not variant-specific. No automatic level 25 premium. Compare shows only this exact level, quality and breed. A manual override applies only to this exact pet variant across all realms." : "A manual override sets the final unit resale for this item across all realms until cleared. Source freshness and demand still apply."),
+    resaleEditor(overrideTarget(row), effectiveResale(row), !!override),
   );
   return box;
 }
@@ -1127,17 +1162,17 @@ function renderResaleOverrides() {
   if (!overrides.length) list.append(el("p", "No active resale overrides."));
   for (const entry of overrides) {
     const row = el("div", undefined, "shopping-row");
-    row.append(el("p", `Item ${entry.item_id} • Unit resale ${gold(entry.unit_price)} • Manual • Saved ${entry.updated_at} (${age(entry.updated_at)})`));
+    row.append(el("p", `${entry.pet ? petLabel(entry.pet) : entry.identity?.startsWith("pet:") ? entry.identity : "Item " + entry.item_id} • Unit resale ${gold(entry.unit_price)} • Manual • Saved ${entry.updated_at} (${age(entry.updated_at)})`));
     const edit = el("button", "Edit", "secondary"), clear = el("button", "Clear override", "secondary");
     edit.type = clear.type = "button";
     edit.onclick = () => {
-      $("override-item-id").value = String(entry.item_id);
+      $("override-item-id").value = String(entry.identity?.startsWith("pet:") ? entry.identity : entry.item_id);
       $("override-unit-price").value = inputGold(entry.unit_price);
     };
     clear.onclick = async () => {
       if (resaleSaving) return;
       clear.disabled = true;
-      try { await saveResaleOverride(entry.item_id, null, true); }
+      try { await saveResaleOverride(entry.identity?.startsWith("pet:") ? entry.identity : entry.item_id, null, true); }
       catch (error) { message(error.message, true); }
       finally { clear.disabled = false; }
     };
@@ -1188,13 +1223,13 @@ function renderSettings() {
       state.settings[key],
       "number",
     );
-  for (const category of ["recipe", "mount", "toy"]) {
+  for (const category of ["recipe", "mount", "toy", "decor", "battle-pet"]) {
     const label = el("label"),
       input = el("input");
     input.type = "checkbox";
     input.id = "category-" + category;
     input.checked = state.settings.categories.includes(category);
-    label.append(input, document.createTextNode(category));
+    label.append(input, document.createTextNode(({recipe:"Recipes", mount:"Mounts", toy:"Toys", decor:"Decor", "battle-pet":"Battle pets"})[category]));
     $("filter-settings").append(label);
   }
   renderRealmSelection();
@@ -1309,7 +1344,7 @@ function renderCorrection(force = false) {
         select.append(new Option("No specific lot", ""));
       for (const lot of state.history.filter((e) => e.type === "purchase"))
         select.append(
-          new Option(`#${lot.id} ${lot.candidate.valuation.name}`, lot.id),
+          new Option(`#${lot.id} ${candidateName(lot.candidate)}`, lot.id),
         );
       select.value = event[key] || "";
       label.append(select);
@@ -1419,7 +1454,7 @@ $("settings-form").onsubmit = (event) => {
           `input[data-membership=${type}]:checked`,
         ),
       ].map((n) => n.dataset.realm);
-    data.categories = ["recipe", "mount", "toy"].filter(
+    data.categories = ["recipe", "mount", "toy", "decor", "battle-pet"].filter(
       (c) => $("category-" + c).checked,
     );
     await api("/api/settings", data);
@@ -1467,7 +1502,7 @@ for (const button of document.querySelectorAll("nav button"))
       message(error.message, true);
     }
   };
-for (const id of ["sort", "direction", "destination"])
+for (const id of ["sort", "direction", "destination", "category"])
   $(id).onchange = () => {
     resultsPage = 1;
     loadResults().catch((e) => message(e.message, true));

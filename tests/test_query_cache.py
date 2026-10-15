@@ -36,10 +36,10 @@ def test_reuses_analysis_and_invalidates_settings_snapshots_and_realms(tmp_path,
     first = MarketQuery(repo).page({})
     assert first['total'] == 1
     assert MarketQuery(repo).page({}) == first
-    assert len(reads) == 2
+    assert len(reads) == 3
     repo.save_settings(replace(repo.load_settings(), min_profit=20000000))
     assert MarketQuery(repo).page({})['total'] == 0
-    assert len(reads) == 4
+    assert len(reads) == 6
     repo.save_settings(replace(repo.load_settings(), min_profit=1))
     snap = repo.latest('tsm:us')
     repo.publish(replace(snap, source_time=None))
@@ -58,7 +58,7 @@ def test_concurrent_requests_build_once(tmp_path, monkeypatch):
     with ThreadPoolExecutor(max_workers=6) as pool:
         results = list(pool.map(request, range(6)))
     assert all(result == results[0] for result in results)
-    assert len(reads) == 2
+    assert len(reads) == 3
 
 
 def test_exact_freshness_boundary_and_clock_rewind(tmp_path, monkeypatch):
@@ -140,12 +140,12 @@ def test_destination_expiry_and_query_options_do_not_load_snapshots(tmp_path, mo
     comparison = MarketQuery(repo).page({})['rows'][0]['comparisons'][0]
     assert comparison['listing_count'] == 1
     assert MarketQuery(repo).page({'q':'nothing'})['total'] == 0
-    assert len(reads) == 3
+    assert len(reads) == 4
     current[0] += timedelta(microseconds=1)
     comparison = MarketQuery(repo).page({})['rows'][0]['comparisons'][0]
     assert comparison['listing_count'] == 0
     assert 'stale_destination_evidence' in comparison['risks']
-    assert len(reads) == 6
+    assert len(reads) == 8
 
 
 def test_analysis_does_not_load_or_retain_raw_payloads(tmp_path, monkeypatch):

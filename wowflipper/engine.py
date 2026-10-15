@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext, ROUND_FLOOR
 from .models import Candidate, Auction, is_fresh, integer, decimal
+from .identity import pet_details, market_key, override_key
 
 
 def _simple(auction):
@@ -48,9 +49,12 @@ def exclusion_reason(auction, valuation, settings, now, resale_override=None):
         decimal(valuation.sold_per_day)
     except (ValueError, TypeError):
         return 'invalid_valuation_or_listing'
-    if auction.item_id != valuation.item_id:
+    pet = pet_details(auction)
+    if auction.item_id != valuation.item_id or (pet['species_id'] if pet else None) != valuation.pet_species_id:
         return 'valuation_identity_mismatch'
-    if auction.category in {'pet', 'battle-pet'}:
+    if auction.item_id == 82800 and not pet:
+        return 'unsupported_complex_variant'
+    if auction.category in {'pet', 'battle-pet'} and not pet:
         return 'unsupported_pet'
     if auction.category in {'gear', 'armor', 'weapon'}:
         return 'ambiguous_gear_valuation'
@@ -58,9 +62,9 @@ def exclusion_reason(auction, valuation, settings, now, resale_override=None):
         return 'missing_item_metadata'
     if not auction.category or auction.category == 'unknown':
         return 'unknown_item_category'
-    if not _simple(auction):
+    if not pet and not _simple(auction):
         return 'unsupported_complex_variant'
-    if auction.metadata.get('tradeability') is False:
+    if auction.metadata.get('tradeability') is False or (pet and auction.metadata.get('tradeability') is not True):
         return 'unsuitable_tradeability'
     if auction.category not in settings.categories:
         return 'category_filtered'
@@ -87,11 +91,13 @@ def evaluate(auction, valuation, settings, now, resale_override=None):
         ctx.prec = _precision(settings)
         resale, _, proceeds, profit, roi = _amounts(auction, valuation, settings, resale_override)
     risks = ['regional_demand_not_destination_specific', 'resale_price_is_assumption']
+    if pet_details(auction):
+        risks.append('species_aggregate_price_not_variant_specific')
     if auction.metadata.get('tradeability') is not True:
         risks.append('unverified_tradeability')
     return Candidate((auction.region, auction.house_id, auction.auction_id), auction, valuation,
                      proceeds, profit, roi, (), tuple(risks),
-                     'Full listing purchase; estimated proceeds floor after auction cut, less purchase and per-listing costs. Regional sales statistics do not guarantee destination demand or resale proceeds.', resale, dict(resale_override) if resale_override else None)
+                     ('Full listing purchase; estimated proceeds floor after auction cut, less purchase and per-listing costs. Regional sales statistics do not guarantee destination demand or resale proceeds.' + (' Pet price and demand aggregate the species across levels, qualities and breeds; no level-specific premium is assumed.' if pet_details(auction) else '')), resale, dict(resale_override) if resale_override else None)
 
 
 def rank(candidates, strategy='general'):
@@ -119,7 +125,7 @@ def index_destinations(snapshots):
         items = {}
         for auction in snap.records:
             if isinstance(auction, Auction):
-                items.setdefault(auction.item_id, []).append(auction)
+                items.setdefault(override_key(auction), []).append(auction)
         index[snap.source_key] = items
     return index
 
@@ -146,7 +152,7 @@ def compare_destinations(candidate, snapshots, settings, now=None, index=None):
             elif not is_fresh(snap.source_time, settings.max_auction_age_hours, now):
                 risks.append('stale_destination_evidence')
             else:
-                records = snap.records if index is None else index.get(snap.source_key, {}).get(candidate.auction.item_id, ())
+                records = snap.records if index is None else index.get(snap.source_key, {}).get(override_key(candidate.auction), ())
                 for a in records:
                     if not isinstance(a, Auction) or a.item_id != candidate.auction.item_id or a.region != candidate.auction.region:
                         continue
@@ -154,9 +160,13 @@ def compare_destinations(candidate, snapshots, settings, now=None, index=None):
                         continue
                     if (a.region, a.house_id, a.auction_id) == candidate.key:
                         continue
-                    if not _simple(a):
+                    if pet_details(candidate.auction):
+                        if not pet_details(a) or market_key(a) != market_key(candidate.auction): continue
+                    elif not _simple(a):
                         continue
-                    if a.category != candidate.auction.category or a.metadata.get('tradeability') is False:
+                    if not isinstance(a.metadata,dict) or a.category != candidate.auction.category or a.metadata.get('tradeability') is False:
+                        continue
+                    if pet_details(candidate.auction) and a.metadata.get('tradeability') is not True:
                         continue
                     try:
                         integer(a.quantity, 1)
@@ -174,5 +184,5 @@ def compare_destinations(candidate, snapshots, settings, now=None, index=None):
                             'quantity': sum(a.quantity for a in matches), 'listing_count': len(matches),
                             'lowest_unit_ask': lowest, 'assumed_unit_resale': resale,
                             'risks': tuple(risks),
-                            'explanation': 'Exact simple-item asking prices and quantities; asks are not confirmed sales. Transfer eligibility requires verification.'})
+                            'explanation': ('Exact species, level, quality and breed asking prices and quantities; asks are not confirmed sales. Transfer eligibility requires verification.' if pet_details(candidate.auction) else 'Exact simple-item asking prices and quantities; asks are not confirmed sales. Transfer eligibility requires verification.')})
     return results
