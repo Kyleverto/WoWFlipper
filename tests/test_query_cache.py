@@ -206,3 +206,32 @@ def test_cold_build_crossing_valuation_deadline_is_retried(tmp_path, monkeypatch
         return original(snapshots)
     monkeypatch.setattr(module, 'index_destinations', slow_index)
     assert MarketQuery(repo).page({})['total'] == 0
+
+
+def test_category_selection_filters_before_totals_pages_and_csv(tmp_path):
+    import csv, io
+    repo, _ = fixture_repo(tmp_path)
+    repo.save_settings(replace(repo.load_settings(), categories=('recipe','mount','toy')))
+    auctions = repo.latest('auctions:us:1')
+    values = repo.latest('tsm:us')
+    repo.publish(replace(auctions, records=tuple(replace(auctions.records[0], auction_id=i, item_id=i+10, category=category) for i, category in enumerate(('recipe','toy','mount','recipe'), 1))))
+    repo.publish(replace(values, records=tuple(replace(values.records[0], item_id=i+10, name=name) for i, name in enumerate(('A Recipe','B Toy','C Mount','D Recipe'), 1))))
+    client = create_app(tmp_path, testing=True).test_client()
+    def get(query): return client.get('/api/results'+query)
+    query='?categories=recipe,mount&sort=name&direction=asc&page_size=2&page=2'
+    result=get(query).json
+    assert result['total']==3
+    assert result['pages']==2
+    assert [r['valuation']['name'] for r in result['rows']]==['D Recipe']
+    exported=list(csv.DictReader(io.StringIO(client.get('/api/export'+query).text)))
+    assert [r['Item'] for r in exported]==['D Recipe']
+    assert get('?category=toy').json['total']==1
+    assert get('?category=all').json['total']==4
+    assert get('').json['total']==4
+    assert get('?categories=mount&category=toy').json['rows'][0]['auction']['category']=='mount'
+    empty=get('?categories=&category=toy').json
+    assert empty['rows']==[] and empty['total']==0 and empty['pages']==1
+    assert list(csv.DictReader(io.StringIO(client.get('/api/export?categories=').text)))==[]
+    for invalid in ('unknown','recipe,unknown','recipe,,mount','all'):
+        assert get('?categories='+invalid).status_code==400
+        assert client.get('/api/export?categories='+invalid).status_code==400

@@ -97,8 +97,14 @@ class MarketQuery:
     def _ordered(self,args):
         query=args.get('q','').casefold().strip()
         candidates=[c for c in rank(self.candidates.values()) if query in c.valuation.name.casefold() or query in str(c.auction.item_id)]
-        category=args.get('category','')
-        if category and category != 'all': candidates=[c for c in candidates if c.auction.category==category]
+        if 'categories' in args:
+            selected=set(args['categories'].split(',')) if args['categories'] else set()
+            if not selected <= {'recipe','mount','toy','decor','battle-pet'}:
+                raise ValueError('Unknown category')
+            candidates=[c for c in candidates if c.auction.category in selected]
+        else:
+            category=args.get('category','')
+            if category and category != 'all': candidates=[c for c in candidates if c.auction.category==category]
         sort=args.get('sort','profit'); direction=args.get('direction','desc')
         sorts={'name':lambda c:c.valuation.name.casefold(),'cost':lambda c:c.auction.buyout,'profit':lambda c:c.profit,'roi':lambda c:c.roi,'quantity':lambda c:c.auction.quantity,'sale_rate':lambda c:c.valuation.sale_rate,'sold_per_day':lambda c:c.valuation.sold_per_day}
         if sort=='ranking': sort='profit'  # Legacy query compatibility.

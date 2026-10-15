@@ -29,7 +29,26 @@ context.fixture.resale_overrides=[{identity:'pet:39:25:3:4',pet:pet.pet,unit_pri
 
 def test_category_query_is_retained_for_accepted_csv_and_resets_page():
     run_behavior(r'''
-vm.runInContext(source.slice(source.indexOf('for (const id of ["sort",'),source.indexOf('let searchTimer;')),context);node('category').value='battle-pet';vm.runInContext('resultsPage=4',context);node('category').onchange();assert.equal(new URLSearchParams(requests[0].path.split('?')[1]).get('category'),'battle-pet');assert.equal(new URLSearchParams(requests[0].path.split('?')[1]).get('page'),'1');requests[0].resolve({rows:[row],page:1,page_size:100,total:1,pages:1,exclusion_total:0});await flush();assert.equal(new URLSearchParams(node('export').href.split('?')[1]).get('category'),'battle-pet');
+vm.runInContext(source.slice(source.indexOf('for (const id of ["sort",'),source.indexOf('let searchTimer;')),context);
+const view=id=>controls(node('opportunity-categories'),'input').find(n=>n.id==='view-category-'+id);const checks=controls(node('opportunity-categories'),'input');assert.equal(checks.length,5);assert.ok(checks.every(n=>n.checked));
+view('battle-pet').checked=false;vm.runInContext('resultsPage=4',context);view('battle-pet').onchange();
+assert.equal(new URLSearchParams(requests[0].path.split('?')[1]).get('categories'),'recipe,mount,toy,decor');assert.equal(new URLSearchParams(requests[0].path.split('?')[1]).get('page'),'1');
+assert.equal(node('export').attrs['aria-disabled'],'true');requests[0].resolve({rows:[row],page:1,page_size:100,total:1,pages:1,exclusion_total:0});await flush();assert.equal(new URLSearchParams(node('export').href.split('?')[1]).get('categories'),'recipe,mount,toy,decor');
+for(const check of checks)check.checked=false;checks[0].onchange();assert.equal(new URLSearchParams(requests[1].path.split('?')[1]).get('categories'),'');requests[1].resolve({rows:[],page:1,page_size:100,total:0,pages:1,exclusion_total:0});await flush();assert.ok(text(node('results')).includes('Select at least one category'));
+''')
+
+
+def test_category_selection_storage_poll_and_drafts_are_independent():
+    run_behavior(r'''
+const stored=new Map([['opportunity-categories',JSON.stringify(['recipe','toy'])]]);context.sessionStorage={getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,value)};
+vm.runInContext(source.slice(source.indexOf('for (const id of ["sort",'),source.indexOf('let searchTimer;')),context);
+const view=id=>controls(node('opportunity-categories'),'input').find(n=>n.id==='view-category-'+id);assert.equal(view('recipe').checked,true);assert.equal(view('toy').checked,true);assert.equal(view('battle-pet').checked,false);
+context.items=[row];vm.runInContext('rows=items;renderResults()',context);const input=controls(controls(node('results'),'tr')[2],'input')[0];input.value='8.7654';input.oninput();node('setting-capital').value='777';node('category-battle-pet').checked=true;
+view('mount').checked=true;view('mount').onchange();assert.deepEqual(JSON.parse(stored.get('opportunity-categories')),['recipe','mount','toy']);requests[0].resolve({rows:[row],page:1,page_size:100,total:1,pages:1,exclusion_total:0});await flush();assert.equal(controls(controls(node('results'),'tr')[2],'input')[0].value,'8.7654');assert.equal(node('setting-capital').value,'777');assert.equal(node('category-battle-pet').checked,true);
+vm.runInContext('renderCapital=()=>{};renderSources=()=>{};renderInventory=()=>{};renderLedger=()=>{};populateDestinations=()=>{};renderShoppingGroups=()=>{}',context);const polling=vm.runInContext('reloadState()',context);requests[1].resolve({...context.fixture,csrf:'token',mode:'local',refresh:{running:false},settings:{...context.fixture.settings,categories:['recipe','mount','toy','decor','battle-pet']}});await polling;assert.equal(view('battle-pet').checked,false);assert.equal(view('mount').checked,true);
+vm.runInContext('initializeOpportunityCategories()',context);assert.equal(view('mount').checked,true);assert.equal(view('battle-pet').checked,false);
+stored.set('opportunity-categories','[]');vm.runInContext('initializeOpportunityCategories()',context);assert.ok(controls(node('opportunity-categories'),'input').every(n=>!n.checked));assert.equal(vm.runInContext('params().get("categories")',context),'');
+stored.set('opportunity-categories','not-json');vm.runInContext('initializeOpportunityCategories()',context);assert.ok(controls(node('opportunity-categories'),'input').every(n=>n.checked));
 ''')
 
 

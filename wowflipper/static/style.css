@@ -10,4 +10,6 @@ button.sort-button{padding:0;background:transparent;border:0;color:var(--nav);fo
 
 #inventory{margin-top:12px}#inventory td{white-space:normal}#inventory td:nth-child(3){min-width:150px;max-width:260px}#inventory td:nth-child(5){min-width:200px}#inventory label{margin:0;font-size:12px}#inventory select,#inventory input{padding:5px 7px;margin:3px 0 5px}#inventory td>button{font-size:12px;padding:4px 8px;margin-bottom:8px}#inventory details{min-width:140px}#inventory details[open]{min-width:230px}#inventory form{padding:10px;margin-top:8px;border-radius:0}#inventory form button{font-size:12px;padding:6px 9px}#inventory small{overflow-wrap:anywhere}#inventory td:first-child{min-width:180px}
 
-#override-item-id{min-width:240px;max-width:100%}.resale-verification p{max-width:80ch}#category{min-width:150px}
+#override-item-id{min-width:240px;max-width:100%}.resale-verification p{max-width:80ch}
+
+.toolbar .opportunity-category-filter{padding:0;border:0;margin:0 0 12px}.opportunity-category-filter legend{font-size:13px;padding:0;margin-bottom:7px}.toolbar #opportunity-categories{display:flex;flex-wrap:wrap;gap:6px 12px;max-width:330px}.toolbar #opportunity-categories label{display:flex;align-items:center;min-width:0;margin:0;font-weight:400;white-space:nowrap}

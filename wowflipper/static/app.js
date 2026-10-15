@@ -154,10 +154,44 @@ async function action(button, work) {
     button.disabled = button.id === "refresh" && (state?.refresh.running || state?.mode === "offline-demo");
   }
 }
+const opportunityCategoryLabels = {
+  recipe: "Recipes", mount: "Mounts", toy: "Toys", decor: "Decor", "battle-pet": "Battle pets",
+};
+let visibleCategories = Object.keys(opportunityCategoryLabels);
+function initializeOpportunityCategories() {
+  const known = Object.keys(opportunityCategoryLabels);
+  visibleCategories = known;
+  try {
+    const saved = JSON.parse(sessionStorage.getItem("opportunity-categories"));
+    if (Array.isArray(saved) && saved.every(c => known.includes(c)))
+      visibleCategories = known.filter(c => saved.includes(c));
+  } catch (_) { /* Invalid or unavailable storage uses the default selection. */ }
+  const container = $("opportunity-categories");
+  container.replaceChildren();
+  const checks = [];
+  for (const category of known) {
+    const label = el("label"), input = el("input");
+    input.type = "checkbox";
+    input.id = "view-category-" + category;
+    input.value = category;
+    input.checked = visibleCategories.includes(category);
+    checks.push(input);
+    input.onchange = () => {
+      visibleCategories = checks.filter(c => c.checked).map(c => c.value);
+      try {
+        sessionStorage.setItem("opportunity-categories", JSON.stringify(visibleCategories));
+      } catch (_) { /* Filtering still works when browser storage is unavailable. */ }
+      resultsPage = 1;
+      loadResults().catch(e => message(e.message, true));
+    };
+    label.append(input, document.createTextNode(opportunityCategoryLabels[category]));
+    container.append(label);
+  }
+}
 function params() {
   return new URLSearchParams({
     q: $("search").value,
-    category: $("category").value,
+    categories: visibleCategories.join(","),
     sort: $("sort").value,
     direction: $("direction").value,
     page: resultsPage,
@@ -423,7 +457,7 @@ function renderResults() {
     container.append(
       el(
         "div",
-        "No eligible opportunities. Choose buying and selling realms in Settings, refresh sources or import offline evidence. Stale sources, uncertain variants and filters exclude rows.",
+        (!visibleCategories.length ? "Select at least one category to show opportunities." : "No eligible opportunities. Choose buying and selling realms in Settings, refresh sources or import offline evidence. Stale sources, uncertain variants and filters exclude rows."),
         "empty",
       ),
     );
@@ -1502,11 +1536,12 @@ for (const button of document.querySelectorAll("nav button"))
       message(error.message, true);
     }
   };
-for (const id of ["sort", "direction", "destination", "category"])
+for (const id of ["sort", "direction", "destination"])
   $(id).onchange = () => {
     resultsPage = 1;
     loadResults().catch((e) => message(e.message, true));
   };
+initializeOpportunityCategories();
 for (const [prefix, load] of [["result", loadResults], ["exclusion", loadExclusions]]) {
   for (const [direction, step] of [["previous", -1], ["next", 1]]) {
     $(prefix + "-" + direction).onclick = () => {
