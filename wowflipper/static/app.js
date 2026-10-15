@@ -5,6 +5,8 @@ let state,
   shopping = [],
   csrf,
   currentTab = "opportunities";
+const inventoryRows = new Map(), inventoryRetries = new Map();
+let inventoryTable, stateSequence = 0, stateGeneration = 0;
 const shoppingRows = new Map();
 const shoppingGroups = new Map();
 let shoppingSequence = 0;
@@ -204,7 +206,11 @@ function configuredDestination(value) {
   return state.settings.selling_realms.includes(value);
 }
 async function loadState(initial = false) {
-  state = await api("/api/state");
+  const sequence = ++stateSequence, generation = stateGeneration;
+  const next = await api("/api/state");
+  if (sequence !== stateSequence || generation !== stateGeneration) return;
+  state = next;
+  for (const controller of inventoryRows.values()) controller.refreshRequired = false;
   csrf = state.csrf;
   $("mode").textContent =
     state.mode === "offline-demo"
@@ -214,6 +220,7 @@ async function loadState(initial = false) {
   $("refresh").textContent = state.refresh.running ? "Refreshing sources…" : "Refresh sources";
   renderCapital();
   renderSources();
+  renderInventory();
   renderLedger();
   if (initial) renderSettings();
   else if (currentTab === "settings") { renderRealmSelection(true); renderResaleOverrides(); }
@@ -779,36 +786,175 @@ async function loadShopping() {
   }
   renderShoppingGroups();
 }
+function renderInventory() {
+  const lots = state?.summary?.inventory || [];
+  if (!inventoryTable) {
+    inventoryTable = table(["Lot / item", "Units / cost", "Bought on", "Purchased", "Status / destination", "Outcome"]);
+    $("inventory").append(inventoryTable.wrap);
+  }
+  const currentDestination = $("inventory-destination").value;
+  $("inventory-destination").replaceChildren(new Option("All destinations", ""));
+  for (const value of [...new Set([...state.settings.selling_realms, ...lots.map(l => l.destination)])])
+    $("inventory-destination").append(new Option(value, value));
+  $("inventory-destination").value = currentDestination || "";
+  const ids = new Set(lots.map(l => l.id));
+  for (const [id, controller] of inventoryRows) {
+    if (!ids.has(id) && !pending.has(`inventory:${id}`) && !controller.busy) inventoryRows.delete(id);
+  }
+  const ordered = [];
+  for (const lot of lots) {
+    if (!inventoryRows.has(lot.id)) inventoryRows.set(lot.id, inventoryController(lot));
+    const controller = inventoryRows.get(lot.id);
+    controller.update(lot);
+    ordered.push(controller.row);
+  }
+  // Keep an unconfirmed action reachable even if a refreshed view omits its lot.
+  for (const [id, controller] of inventoryRows) if (!ids.has(id)) {
+    controller.missing = true; controller.sync(); ordered.push(controller.row);
+  }
+  for (const [key, entry] of pending) {
+    if (!key.startsWith("inventory:") || inventoryRows.has(Number(key.slice(10)))) continue;
+    if (!inventoryRetries.has(key)) {
+      const row = el("tr"), cell = addCell(row); cell.setAttribute("colspan", "6");
+      const [path, payload] = JSON.parse(entry.fingerprint), event = payload.event;
+      const retry = el("button", "Retry saved action"), controller = {row, busy:false};
+      cell.append(el("strong", `Lot #${event.purchase_id} • ${event.type} not confirmed`), el("small", "This lot is absent from current holdings. Retry the saved action to confirm its result."), retry);
+      retry.onclick = async () => {
+        if (controller.busy) return;
+        controller.busy = true; retry.disabled = true; stateGeneration++;
+        try {await mutation(path, payload, key); stateGeneration++; message("Saved inventory action confirmed."); await loadState();}
+        catch (error) {message(error.message, true);}
+        finally {controller.busy = false; retry.disabled = false; renderInventory();}
+      };
+      inventoryRetries.set(key, controller);
+    }
+  }
+  for (const [key, controller] of inventoryRetries) {
+    if ((!pending.has(key) && !controller.busy) || inventoryRows.has(Number(key.slice(10)))) inventoryRetries.delete(key);
+    else ordered.push(controller.row);
+  }
+  reconcileShoppingChildren(inventoryTable.body, ordered);
+  const query = $("inventory-search").value.trim().toLowerCase();
+  let visible = inventoryRetries.size;
+  for (const controller of inventoryRows.values()) {
+    const lot = controller.lot;
+    controller.row.hidden = !(pending.has(`inventory:${lot.id}`) || controller.busy) && (
+      !`${lot.candidate.valuation.name} ${lot.candidate.auction.item_id} #${lot.id}`.toLowerCase().includes(query) ||
+      (!!$("inventory-status").value && (lot.status || "held") !== $("inventory-status").value) ||
+      (!!$("inventory-destination").value && lot.destination !== $("inventory-destination").value));
+    if (!controller.row.hidden) visible++;
+  }
+  $("inventory-empty").hidden = visible > 0;
+  $("inventory-empty").textContent = lots.length ? "No lots match these filters." : "No held inventory. Record a purchase from Shopping list.";
+}
+function inventoryController(initial) {
+  const controller = {lot: initial, busy: false, missing: false, refreshRequired: false}, row = el("tr");
+  controller.row = row;
+  const identity = addCell(row), basis = addCell(row), source = addCell(row), date = addCell(row), management = addCell(row), outcomes = addCell(row);
+  const statusLabel = el("label", "Status"), status = el("select");
+  status.setAttribute("aria-label", `Status for lot #${initial.id}`);
+  for (const [value, label] of [["held", "Held"], ["ready", "Ready to sell"], ["listed", "Listed"]]) status.append(new Option(label, value));
+  status.value = initial.status || "held"; statusLabel.append(status);
+  const destination = destinationControl(initial.destination, `lot #${initial.id}`);
+  const saveStatus = el("button", "Save status"), saveDestination = el("button", "Save destination"), notice = el("small");
+  management.append(statusLabel, saveStatus, destination.label, saveDestination, notice);
+  const detail = el("details"), summary = el("summary", "Record outcome"), form = el("form"), typeLabel = el("label", "Outcome"), type = el("select");
+  for (const [value,label] of [["sale", "Partial / full sale"], ["expiration", "Expired listing"], ["fee", "Additional fee"], ["cancellation", "Canceled listing"]]) type.append(new Option(label,value));
+  type.value = "sale"; typeLabel.append(type);
+  const quantityLabel = el("label", "Units sold"), quantity = el("input");
+  quantity.type = "number"; quantity.min = "1"; quantity.step = "1"; quantity.value = String(initial.remaining_quantity); quantityLabel.append(quantity);
+  const amountLabel = el("label"), amountCaption = el("span", "Net proceeds (gold, after auction cut)"), amount = el("input");
+  amount.inputMode = "decimal"; amount.value = ""; amountLabel.append(amountCaption, amount);
+  const noteLabel = el("label", "Note"), note = el("input"); note.maxLength = 500; noteLabel.append(note);
+  const record = el("button", "Record outcome"); record.type = "submit";
+  form.append(typeLabel, quantityLabel, amountLabel, noteLabel, record); detail.append(summary, form); outcomes.append(detail);
+  let statusDirty = false, destinationDirty = false, outcomeDirty = false, resetQuantity = false;
+  const key = `inventory:${initial.id}`;
+  function pendingEvent() { const entry = pending.get(key); return entry ? JSON.parse(entry.fingerprint)[1].event : null; }
+  function fields() {
+    quantityLabel.hidden = type.value !== "sale";
+    amountLabel.hidden = !["sale", "fee"].includes(type.value);
+    amountCaption.textContent = type.value === "fee" ? "Additional fee (gold)" : "Net proceeds (gold, after auction cut)";
+    amount.required = !amountLabel.hidden;
+  }
+  controller.sync = () => {
+    const event = pendingEvent(), locked = controller.busy || !!event || controller.refreshRequired;
+    for (const input of [status, destination.select, type, quantity, amount, note]) input.disabled = locked;
+    if (!locked) destination.select.disabled = !state.settings.selling_realms.length;
+    saveStatus.disabled = controller.busy || controller.refreshRequired || (event ? event.type !== "inventory-update" || !event.status : controller.missing || !statusDirty);
+    saveDestination.disabled = controller.busy || controller.refreshRequired || (event ? event.type !== "inventory-update" || !event.destination : controller.missing || !destinationDirty || !configuredDestination(destination.select.value));
+    record.disabled = controller.busy || controller.refreshRequired || (event ? event.type === "inventory-update" : controller.missing);
+    notice.textContent = controller.refreshRequired ? "Outcome recorded. Reload to refresh holdings before another action." : event ? "Action not confirmed. Retry with the saved values." : `Saved: ${controller.lot.status || "held"} • ${controller.lot.destination}`;
+    fields();
+  };
+  controller.update = lot => {
+    controller.lot = lot; controller.missing = false;
+    identity.replaceChildren(el("strong", lot.candidate.valuation.name), el("small", `#${lot.id} • Item ${lot.candidate.auction.item_id}`));
+    basis.replaceChildren(el("strong", `${lot.remaining_quantity} units held`), el("small", `Paid ${gold(lot.cost)} • Remaining basis ${gold(lot.remaining_cost)}`));
+    source.replaceChildren(el("span", buyingRealmNames(lot.key[1])), el("small", `Connected auction house ${lot.key[1]}`));
+    const purchased = lot.recorded_at, days = Math.max(0, Math.floor((Date.now() - Date.parse(purchased)) / 86400000));
+    date.replaceChildren(el("span", purchased ? purchased.slice(0,10) : "Unknown date"), el("small", Number.isFinite(days) ? `${days} days held` : "Age unavailable"));
+    if (!statusDirty) status.value = lot.status || "held";
+    const choice = destinationDirty ? destination.select.value : lot.destination;
+    const options = destinationControl(choice, `lot #${lot.id}`);
+    destination.select.replaceChildren(...options.select.children); destination.select.value = choice;
+    if (!outcomeDirty || resetQuantity) {quantity.value = String(lot.remaining_quantity); resetQuantity = false;}
+    quantity.max = String(lot.remaining_quantity);
+    const event = pendingEvent();
+    if (event) {
+      if (event.status) status.value = event.status;
+      if (event.destination) destination.select.value = event.destination;
+      if (event.type !== "inventory-update") {type.value = event.type; if (event.quantity) quantity.value = String(event.quantity); if (event.net_proceeds !== undefined || event.amount !== undefined) amount.value = inputGold(event.net_proceeds ?? event.amount); note.value = event.note || "";}
+    }
+    controller.sync();
+  };
+  status.onchange = () => {statusDirty = status.value !== (controller.lot.status || "held"); controller.sync();};
+  destination.select.onchange = () => {destinationDirty = destination.select.value !== controller.lot.destination; controller.sync();};
+  type.onchange = () => {outcomeDirty = true; fields();};
+  for (const input of [quantity, amount, note]) input.oninput = () => {outcomeDirty = true;};
+  async function write(makeEvent) {
+    if (controller.busy || controller.refreshRequired || (controller.missing && !pending.has(key))) return;
+    let confirmedEvent;
+    try {
+      const event = pendingEvent() || makeEvent();
+      controller.busy = true; stateGeneration++; controller.sync();
+      await mutation("/api/ledger", {event}, key);
+      confirmedEvent = event;
+      stateGeneration++;
+      if (inventoryRows.get(initial.id) !== controller) return;
+      if (event.type === "inventory-update") {
+        controller.lot = {...controller.lot, ...(event.status ? {status:event.status} : {}), ...(event.destination ? {destination:event.destination} : {})};
+        state.summary.inventory = state.summary.inventory.map(lot => lot.id === initial.id ? controller.lot : lot);
+        if (event.status) statusDirty = false;
+        if (event.destination) destinationDirty = false;
+      } else {outcomeDirty = false; resetQuantity = true; amount.value = ""; note.value = "";}
+      message("Inventory updated."); await loadState();
+    } catch (error) {
+      if (confirmedEvent && confirmedEvent.type !== "inventory-update") controller.refreshRequired = true;
+      message(confirmedEvent ? "Inventory action recorded, but holdings could not be refreshed. Reload to get the current holdings." : error.message, true);
+    }
+    finally {controller.busy = false; controller.sync(); renderInventory();}
+  }
+  saveStatus.onclick = () => saveStatus.disabled ? undefined : write(() => ({type:"inventory-update", purchase_id:initial.id, status:status.value}));
+  saveDestination.onclick = () => saveDestination.disabled ? undefined : write(() => ({type:"inventory-update", purchase_id:initial.id, destination:destination.select.value}));
+  form.onsubmit = event => {
+    event.preventDefault(); if (record.disabled) return;
+    return write(() => {
+      const entry = {type:type.value, purchase_id:initial.id};
+      if (type.value === "sale") {
+        entry.quantity = Number(quantity.value);
+        if (!Number.isSafeInteger(entry.quantity) || entry.quantity < 1 || entry.quantity > controller.lot.remaining_quantity) throw Error("Enter units sold within the remaining quantity");
+        entry.net_proceeds = copper(amount.value);
+      }
+      if (type.value === "fee") entry.amount = copper(amount.value);
+      if (note.value) entry.note = note.value;
+      return entry;
+    });
+  };
+  return controller;
+}
 function renderLedger() {
   const inventory = state.summary.inventory;
-  $("inventory").replaceChildren();
-  if (!inventory.length)
-    $("inventory").append(
-      el(
-        "div",
-        "No held inventory. Record a purchase from Shopping list.",
-        "empty",
-      ),
-    );
-  else {
-    const { wrap, body } = table([
-      "Lot",
-      "Item",
-      "Remaining units",
-      "Remaining cost basis",
-      "Destination",
-    ]);
-    for (const lot of inventory) {
-      const tr = el("tr");
-      addCell(tr, lot.id);
-      addCell(tr, lot.candidate.valuation.name);
-      addCell(tr, lot.remaining_quantity);
-      addCell(tr, gold(lot.remaining_cost));
-      addCell(tr, lot.destination);
-      body.append(tr);
-    }
-    $("inventory").append(wrap);
-  }
   const old = $("purchase-id").value;
   $("purchase-id").replaceChildren(new Option("No specific inventory lot", ""));
   for (const lot of state.history.filter((e) => e.type === "purchase")) {
@@ -1104,6 +1250,7 @@ function updateRealmCounts() {
   $("realm-count").textContent = `${state.realms.filter(selectableUSRealm).length} US realms discovered • ${selected("buying").length} buying • ${selected("selling").length} selling. Search only changes visibility.`;
 }
 $("realm-search").oninput = filterRealms;
+for (const id of ["inventory-search", "inventory-destination", "inventory-status"]) $(id).oninput = renderInventory;
 for (const [id, clear] of [["realm-select-all", false], ["realm-clear", true]]) {
   $(id).onclick = () => {
     const inputs = [...$("realm-membership").querySelectorAll('input[data-membership=buying]')];
@@ -1145,6 +1292,7 @@ function renderCorrection(force = false) {
   container.hidden = $("correction-action").value === "void";
   const schemas = {
     purchase: ["cost", "quantity", "destination", "note"],
+    "inventory-update": ["purchase_id", ...(event.status !== undefined ? ["status"] : []), ...(event.destination !== undefined ? ["destination"] : []), "note"],
     sale: ["purchase_id", "quantity", "net_proceeds", "note"],
     fee: ["purchase_id", "amount", "note"],
     "balance-adjustment": ["amount", "note"],
@@ -1166,12 +1314,17 @@ function renderCorrection(force = false) {
       select.value = event[key] || "";
       label.append(select);
       container.append(label);
+    } else if (key === "status") {
+      const label = el("label", "Status"), select = el("select"); select.id = "correct-status";
+      for (const [value, text] of [["held","Held"],["ready","Ready to sell"],["listed","Listed"]]) select.append(new Option(text,value));
+      select.value = event.status; label.append(select); container.append(label);
     } else if (key === "destination") {
       const label = el("label", key),
         select = el("select");
       select.id = "correct-" + key;
-      for (const value of state.settings.selling_realms)
+      for (const value of [...new Set([event[key], ...state.settings.selling_realms])])
         select.append(new Option(value, value));
+      select.setAttribute("data-original", event[key]);
       select.value = event[key];
       label.append(select);
       container.append(label);
@@ -1226,6 +1379,8 @@ $("correction-form").onsubmit = (event) => {
         "input,select",
       )) {
         const key = input.id.slice(8);
+        const original = state.history.find(e => e.id === target);
+        if (original?.type === "inventory-update" && key === "destination" && input.value === input.getAttribute("data-original")) continue;
         if (key === "purchase_id" && !input.value) continue;
         replacement[key] = [
           "cost",
@@ -1368,9 +1523,12 @@ $("correction-fields").onchange = () => {
     await loadShopping();
     if (pending.size) {
       message(
-        "An earlier action is unconfirmed. Retry its exact original values below.",
+        [...pending.keys()].some(key => key.startsWith("inventory:"))
+          ? "An inventory action is unconfirmed. Open Inventory to retry its saved values. Other unconfirmed actions can be retried below."
+          : "An earlier action is unconfirmed. Retry its exact original values below.",
       );
       for (const [key, entry] of pending) {
+        if (key.startsWith("inventory:")) continue;
         const [path, payload] = JSON.parse(entry.fingerprint);
         const button = el(
           "button",

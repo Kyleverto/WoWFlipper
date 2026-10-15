@@ -110,3 +110,33 @@ def test_shopping_strategy_optional_and_legacy_queries_match_default(tmp_path):
  selected=post(client,'/api/shopping',{'key':rows[0]['key'],'destination':'agamaggan','request_id':'general'})
  assert selected.status_code==200
  assert selected.json['strategy']=='general'
+
+
+def test_inventory_update_ledger_guard_retry_and_persisted_state(tmp_path):
+    from wowflipper.demo import seed_demo
+    seed_demo(tmp_path)
+    client = create_app(tmp_path, testing=True).test_client()
+    row = client.get('/api/results').json['rows'][0]
+    assert post(client, '/api/shopping', {
+        'key': row['key'], 'destination': 'agamaggan', 'request_id': 'select-inventory',
+    }).status_code == 200
+    purchase = post(client, '/api/ledger', {
+        'event': {'type': 'purchase', 'key': row['key']}, 'request_id': 'buy-inventory',
+    }).json
+    payload = {'event': {'type': 'inventory-update', 'purchase_id': purchase['id'],
+                         'status': 'listed', 'destination': 'agamaggan'},
+               'request_id': 'update-inventory'}
+    assert client.post('/api/ledger', json=payload).status_code == 403
+    assert len(client.get('/api/ledger').json) == 1
+    updated = post(client, '/api/ledger', payload)
+    assert updated.status_code == 200
+    assert post(client, '/api/ledger', payload).json == updated.json
+    changed = dict(payload, event=dict(payload['event'], status='ready'))
+    assert post(client, '/api/ledger', changed).status_code == 400
+    restored = create_app(tmp_path, testing=True).test_client().get('/api/state').json
+    assert len(restored['history']) == 2
+    assert restored['history'][0] == purchase
+    lot = restored['summary']['inventory'][0]
+    assert (lot['status'], lot['destination']) == ('listed', 'agamaggan')
+    assert lot['recorded_at'] == purchase['recorded_at']
+    assert (lot['key'], lot['cost'], lot['remaining_cost']) == (row['key'], purchase['cost'], purchase['cost'])

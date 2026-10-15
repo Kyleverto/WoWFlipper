@@ -185,3 +185,117 @@ def test_single_budget_selection_defaults_to_general(portfolio):
  purchase=portfolio.record({'type':'purchase','key':['us',1,1]},'general-purchase')
  portfolio.record({'type':'correction','target_id':purchase['id'],'replacement':{'cost':900000}},'general-correction')
  assert portfolio.summary()['inventory_cost']==900000
+
+
+def test_inventory_defaults_to_held_for_purchases_and_legacy_replay(portfolio):
+    purchase = buy(portfolio)
+    assert portfolio.summary()['inventory'][0]['status'] == 'held'
+    assert portfolio.summary()['inventory'][0]['recorded_at'] == purchase['recorded_at']
+    assert portfolio.history()[0] == purchase
+    other = Portfolio(portfolio.repository, lambda key: None)
+    assert other.summary()['inventory'][0]['status'] == 'held'
+
+
+def test_inventory_update_persists_without_quotes_or_financial_changes(portfolio):
+    purchase = buy(portfolio)
+    repo = portfolio.repository
+    repo.save_settings(replace(repo.load_settings(), selling_realms=('agamaggan', 'area-52')))
+    before = portfolio.summary()
+    portfolio.candidate_provider = lambda key: None
+    event = {'type': 'inventory-update', 'purchase_id': purchase['id'], 'status': 'listed', 'destination': 'area-52'}
+    result = portfolio.record(event, 'inventory-update')
+    repo.save_settings(replace(repo.load_settings(), selling_realms=(), item_exposure=1))
+    assert portfolio.record(event, 'inventory-update') == result
+    other = Portfolio(repo, lambda key: None)
+    after = other.summary()
+    lot = after['inventory'][0]
+    assert (lot['status'], lot['destination']) == ('listed', 'area-52')
+    assert lot['key'] == ['us', 1, 1]
+    assert (lot['cost'], lot['remaining_cost']) == (1000001, 1000001)
+    assert lot['candidate'] == purchase['candidate']
+    assert lot['recorded_at'] == purchase['recorded_at']
+    assert other.history()[0] == purchase
+    for field in ('cash', 'realized_profit', 'fees', 'inventory_cost', 'initial_capital'):
+        assert after[field] == before[field]
+    assert len(other.history()) == 2
+
+
+@pytest.mark.parametrize('kind', ['expiration', 'cancellation'])
+def test_inventory_partial_sale_keeps_status_and_outcome_resets_ready(portfolio, kind):
+    purchase = buy(portfolio)
+    portfolio.record({'type': 'inventory-update', 'purchase_id': purchase['id'], 'status': 'listed'}, 'listed')
+    portfolio.record({'type': 'sale', 'purchase_id': purchase['id'], 'quantity': 1, 'net_proceeds': 500000}, 'partial')
+    lot = portfolio.summary()['inventory'][0]
+    assert (lot['status'], lot['remaining_quantity'], lot['remaining_cost']) == ('listed', 2, 666668)
+    portfolio.record({'type': kind, 'purchase_id': purchase['id']}, 'outcome')
+    assert portfolio.summary()['inventory'][0]['status'] == 'ready'
+    portfolio.record({'type': 'sale', 'purchase_id': purchase['id'], 'quantity': 2, 'net_proceeds': 1000000}, 'full')
+    assert portfolio.summary()['inventory'] == []
+    with pytest.raises(ValueError):
+        portfolio.record({'type': 'inventory-update', 'purchase_id': purchase['id'], 'status': 'held'}, 'sold-update')
+    assert len(portfolio.history()) == 5
+
+
+def test_legacy_unlinked_expiration_does_not_reset_inventory(portfolio):
+    purchase = buy(portfolio)
+    portfolio.record({'type': 'inventory-update', 'purchase_id': purchase['id'], 'status': 'listed'}, 'listed')
+    portfolio.record({'type': 'expiration'}, 'legacy-expiration')
+    portfolio.record({'type': 'rejection', 'purchase_id': purchase['id']}, 'rejection')
+    assert portfolio.summary()['inventory'][0]['status'] == 'listed'
+
+
+@pytest.mark.parametrize('fields', [
+    {}, {'status': 'sold'}, {'status': None}, {'status': []}, {'destination': 'unknown'},
+    {'destination': None}, {'destination': []}, {'status': 'held', 'cost': 1},
+    {'purchase_id': 999, 'status': 'ready'}, {'purchase_id': True, 'status': 'held'},
+])
+def test_invalid_inventory_update_rolls_back(portfolio, fields):
+    purchase = buy(portfolio)
+    event = dict({'type': 'inventory-update', 'purchase_id': purchase['id']}, **fields)
+    with pytest.raises(ValueError):
+        portfolio.record(event, 'invalid-update')
+    assert portfolio.history() == [purchase]
+    assert portfolio.summary()['inventory'][0]['status'] == 'held'
+
+
+def test_inventory_update_correction_undo_and_dependency_rollback(portfolio):
+    purchase = buy(portfolio)
+    update = portfolio.record({'type': 'inventory-update', 'purchase_id': purchase['id'], 'status': 'listed'}, 'update')
+    portfolio.record({'type': 'correction', 'target_id': update['id'], 'replacement': {'status': 'ready'}}, 'correct')
+    assert portfolio.summary()['inventory'][0]['status'] == 'ready'
+    portfolio.record({'type': 'correction', 'target_id': update['id'], 'replacement': None}, 'undo')
+    assert portfolio.summary()['inventory'][0]['status'] == 'held'
+    portfolio.record({'type': 'correction', 'target_id': update['id'], 'replacement': {'status': 'listed'}}, 'restore')
+    before = portfolio.history()
+    with pytest.raises(ValueError):
+        portfolio.record({'type': 'correction', 'target_id': purchase['id'], 'replacement': None}, 'invalid-void')
+    with pytest.raises(ValueError):
+        portfolio.record({'type': 'correction', 'target_id': update['id'], 'replacement': {'purchase_id': 999}}, 'invalid-target')
+    assert portfolio.history() == before
+    assert portfolio.summary()['inventory'][0]['status'] == 'listed'
+
+
+def test_inventory_correction_cannot_make_prior_update_target_sold_lot(portfolio):
+    purchase = buy(portfolio)
+    sale = portfolio.record({'type': 'sale', 'purchase_id': purchase['id'], 'quantity': 1, 'net_proceeds': 500000}, 'sale')
+    portfolio.record({'type': 'inventory-update', 'purchase_id': purchase['id'], 'status': 'ready'}, 'update')
+    with pytest.raises(ValueError):
+        portfolio.record({'type': 'correction', 'target_id': sale['id'], 'replacement': {'quantity': 3}}, 'invalid-full-sale')
+    assert len(portfolio.history()) == 3
+    assert portfolio.summary()['inventory'][0]['remaining_quantity'] == 2
+
+
+def test_inventory_update_correction_validates_new_destination_preserves_historical(portfolio):
+    purchase = buy(portfolio)
+    repo = portfolio.repository
+    repo.save_settings(replace(repo.load_settings(), selling_realms=('agamaggan', 'area-52')))
+    update = portfolio.record({'type': 'inventory-update', 'purchase_id': purchase['id'], 'destination': 'area-52'}, 'destination')
+    repo.save_settings(replace(repo.load_settings(), selling_realms=('agamaggan',)))
+    portfolio.record({'type': 'correction', 'target_id': update['id'], 'replacement': {'status': 'ready'}}, 'status-correction')
+    assert portfolio.summary()['inventory'][0]['destination'] == 'area-52'
+    for destination in ('area-52', 'unknown'):
+        with pytest.raises(ValueError):
+            portfolio.record({'type': 'correction', 'target_id': update['id'], 'replacement': {'destination': destination}}, destination)
+    portfolio.record({'type': 'correction', 'target_id': update['id'], 'replacement': {'destination': 'agamaggan'}}, 'valid-destination')
+    assert portfolio.summary()['inventory'][0]['destination'] == 'agamaggan'
+    assert portfolio.history()[0]['destination'] == 'agamaggan'

@@ -15,6 +15,7 @@ STRATEGIES = {'general', 'stronger-demand', 'longer-term'}
 EVENT_FIELDS = {
     'purchase': {'type', 'key', 'cost', 'note'},
     'sale': {'type', 'purchase_id', 'quantity', 'net_proceeds', 'note'},
+    'inventory-update': {'type', 'purchase_id', 'status', 'destination', 'note'},
     'fee': {'type', 'purchase_id', 'amount', 'note'},
     'balance-adjustment': {'type', 'amount', 'note'},
     'rejection': {'type', 'purchase_id', 'note'},
@@ -101,7 +102,7 @@ class Portfolio:
                     raise ValueError('Auction already purchased')
                 purchased.add(key)
                 cash -= event['cost']
-                lots[identity] = dict(event, remaining_quantity=event['quantity'], remaining_cost=event['cost'])
+                lots[identity] = dict(event, status='held', remaining_quantity=event['quantity'], remaining_cost=event['cost'])
             elif kind == 'sale':
                 lot = lots.get(event['purchase_id'])
                 if not lot or event['quantity'] > lot['remaining_quantity']:
@@ -113,6 +114,13 @@ class Portfolio:
                 lot['remaining_cost'] -= released
                 cash += event['net_proceeds']
                 realized += event['net_proceeds'] - released
+            elif kind == 'inventory-update':
+                lot = lots.get(event['purchase_id'])
+                if not lot or not lot['remaining_quantity']:
+                    raise ValueError('Inventory update requires an unsold purchase')
+                for field in ('status', 'destination'):
+                    if field in event:
+                        lot[field] = event[field]
             elif kind == 'fee':
                 if 'purchase_id' in event and event['purchase_id'] not in lots:
                     raise ValueError('Fee has no purchase')
@@ -124,6 +132,8 @@ class Portfolio:
             elif kind in {'rejection', 'expiration', 'cancellation'}:
                 if 'purchase_id' in event and event['purchase_id'] not in lots:
                     raise ValueError('Outcome has no purchase')
+                if kind in {'expiration', 'cancellation'} and 'purchase_id' in event:
+                    lots[event['purchase_id']]['status'] = 'ready'
             else:
                 raise ValueError('Unknown outcome type')
             if cash < 0:
@@ -242,6 +252,19 @@ class Portfolio:
         if kind == 'sale':
             result.update(purchase_id=integer(event.get('purchase_id'), 1),
                           quantity=integer(event.get('quantity'), 1), net_proceeds=integer(event.get('net_proceeds')))
+        elif kind == 'inventory-update':
+            result['purchase_id'] = integer(event.get('purchase_id'), 1)
+            if not {'status', 'destination'} & event.keys():
+                raise ValueError('Inventory update requires status or destination')
+            if 'status' in event:
+                status = event['status']
+                if not isinstance(status, str) or status not in {'held', 'ready', 'listed'}:
+                    raise ValueError('Unknown inventory status')
+                result['status'] = status
+            if 'destination' in event:
+                if not isinstance(event['destination'], str) or not event['destination']:
+                    raise ValueError('Expected destination realm')
+                result['destination'] = event['destination']
         elif kind == 'fee':
             result['amount'] = integer(event.get('amount'), 1)
         elif kind == 'balance-adjustment':
@@ -271,6 +294,10 @@ class Portfolio:
         if 'purchase_id' in event and kind in {'fee', 'rejection', 'expiration', 'cancellation'}:
             result['purchase_id'] = integer(event['purchase_id'], 1)
         return result
+
+    def _inventory_destination(self, destination, settings):
+        if not isinstance(destination, str) or destination not in settings.selling_realms:
+            raise ValueError('Destination must be a configured selling realm')
 
     def record(self, event, request_id):
         payload = {'action': 'record', 'event': event}
@@ -331,6 +358,8 @@ class Portfolio:
                         allowed = {'type', 'cost', 'quantity', 'strategy', 'destination', 'note'}
                     if set(replacement) - allowed:
                         raise ValueError('Unknown correction replacement fields')
+                    if original['type'] == 'inventory-update' and 'destination' in replacement:
+                        self._inventory_destination(replacement['destination'], settings)
                     replacement = dict(original, **replacement)
                     if replacement['type'] != original['type']:
                         raise ValueError('Correction must preserve event type')
@@ -342,6 +371,8 @@ class Portfolio:
                     normalized['note'] = event['note']
             else:
                 normalized = self._normalize(event)
+                if kind == 'inventory-update' and 'destination' in normalized:
+                    self._inventory_destination(normalized['destination'], settings)
             normalized['recorded_at'] = datetime.now(timezone.utc).isoformat()
             cursor = db.execute('INSERT INTO portfolio_events(data) VALUES(?)', (serialize(normalized),))
             result = dict(normalized, id=cursor.lastrowid)

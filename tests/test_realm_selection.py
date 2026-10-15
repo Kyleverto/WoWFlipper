@@ -143,8 +143,8 @@ assert.equal($('realm-search').value,'us');
 assert.equal($('realm-select-all').disabled,false);
 assert.equal($('realm-membership').children.find(n=>n.dataset.search.startsWith('new')).hidden,true);
 // Exercise the actual state polling path: choices update while Settings is open.
-context.api=async()=>context.state; context.currentTab='settings';context.shoppingRows=new Map();
-context.renderCapital=context.renderSources=context.renderLedger=context.populateDestinations=context.renderResaleOverrides=context.renderShoppingGroups=()=>{};
+context.api=async()=>context.state; context.currentTab='settings';context.shoppingRows=new Map();context.inventoryRows=new Map();context.stateSequence=0;context.stateGeneration=0;
+context.renderInventory=context.renderCapital=context.renderSources=context.renderLedger=context.populateDestinations=context.renderResaleOverrides=context.renderShoppingGroups=()=>{};
 context.renderSettings=()=>{throw Error('must not reset the full settings form')};
 context.state.mode='live';context.state.refresh={running:false};
 vm.runInContext(source.slice(source.indexOf('async function loadState('),source.indexOf('function renderCapital(')),context);
