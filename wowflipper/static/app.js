@@ -25,6 +25,83 @@ function savePending() {
     "pending-ledger-actions",
     JSON.stringify([...pending]),
   );
+  syncBackupControls();
+}
+let knownDataEpoch = sessionStorage.getItem("personal-data-epoch") || null;
+let epochReloading = false, activeWrites = 0, backupDocument = null, backupPreviewBusy = false, backupRestoring = false, backupPreviewGeneration = 0;
+function invalidatePersonalData() {
+  epochReloading = true;
+  pending.clear(); savePending();
+  stateGeneration++; stateSequence++; shoppingSequence++; resultsSequence++; exclusionsSequence++; resaleGeneration++;
+  resultsRequest?.abort();
+}
+function acceptDataEpoch(next) {
+  if (!next.data_epoch) return true;
+  const previous = knownDataEpoch;
+  knownDataEpoch = next.data_epoch;
+  sessionStorage.setItem("personal-data-epoch", knownDataEpoch);
+  if (previous && previous !== knownDataEpoch) {
+    invalidatePersonalData();
+    globalThis.location?.reload();
+    return false;
+  }
+  return true;
+}
+function backupBlocked() {
+  return epochReloading || backupRestoring || backupPreviewBusy || activeWrites > 0 || !!state?.refresh?.running || pending.size > 0;
+}
+function syncBackupControls() {
+  const restore = $("backup-restore");
+  if (!restore) return;
+  restore.disabled = !backupDocument || backupBlocked();
+  $("backup-preview").disabled = backupPreviewBusy || backupRestoring;
+  $("backup-file").disabled = backupPreviewBusy || backupRestoring;
+  const notice = $("backup-notice");
+  if (notice) notice.textContent = state?.refresh?.running ? "Wait for the refresh to finish before restoring." : pending.size ? "Resolve unconfirmed actions before restoring. Retry their original values." : activeWrites && !backupRestoring ? "Wait for current changes to finish before restoring." : "";
+}
+function showRestoreNotice() {
+  const notice = sessionStorage.getItem("restore-completion-notice");
+  if (!notice || epochReloading) return;
+  sessionStorage.setItem("restore-completion-notice", "");
+  message(notice);
+}
+function initializeBackupControls() {
+  const fileInput = $("backup-file"), preview = $("backup-preview"), restore = $("backup-restore"), summary = $("backup-summary");
+  fileInput.onchange = () => {backupPreviewGeneration++; backupDocument = null; summary.textContent = "Preview the chosen backup before restoring."; syncBackupControls();};
+  preview.onclick = async () => {
+    if (backupPreviewBusy || backupRestoring) return;
+    const generation = ++backupPreviewGeneration;
+    backupDocument = null; backupPreviewBusy = true; syncBackupControls();
+    try {
+      const file = fileInput.files?.[0];
+      if (!file) throw Error("Choose a JSON backup file.");
+      if (file.size > 16 * 1024 * 1024) throw Error("Choose a backup no larger than 16 MiB.");
+      let document;
+      try {document = JSON.parse(await file.text());} catch (_) {throw Error("This file is not valid JSON. Choose an exported backup.");}
+      const result = await api("/api/backup/preview", {backup:document});
+      if (generation !== backupPreviewGeneration || epochReloading) return;
+      const counts = result.counts || {};
+      summary.textContent = `Backup from ${result.created_at || "unknown date"} (${result.mode || "unknown mode"}): ${counts.events || 0} events, ${counts.selections || 0} selections, ${counts.inventory || 0} inventory, ${counts.requests || 0} saved action IDs, ${counts.overrides || 0} overrides${result.cash !== undefined ? `. Cash: ${gold(result.cash)}` : ""}. Ready to restore.`;
+      backupDocument = document;
+    } catch (error) {summary.textContent = error.message;}
+    finally {backupPreviewBusy = false; syncBackupControls();}
+  };
+  restore.onclick = async () => {
+    if (!backupDocument || backupBlocked()) return;
+    backupRestoring = true; syncBackupControls();
+    try {
+      const result = await api("/api/backup/restore", {backup:backupDocument});
+      if (!result.restored) throw Error("Restore was not confirmed. Reload and inspect your data before trying again.");
+      const notice = `Personal backup restored. Recovery copy saved in backups/${result.recovery_backup}. Refresh sources if restored selections use stale listings.`;
+      sessionStorage.setItem("restore-completion-notice", notice);
+      summary.textContent = notice + " Reloading…";
+      invalidatePersonalData();
+      knownDataEpoch = null; sessionStorage.setItem("personal-data-epoch", "");
+      globalThis.location?.reload();
+    } catch (error) {summary.textContent = error.message;}
+    finally {backupRestoring = false; syncBackupControls();}
+  };
+  syncBackupControls();
 }
 const moneyFields = {
   capital: "Initial capital",
@@ -86,6 +163,17 @@ function message(text, error = false) {
   $("message").className = error ? "error" : "";
 }
 async function api(path, data, options = {}) {
+  const writing = data !== undefined && path !== "/api/backup/preview";
+  if (epochReloading || (backupRestoring && writing && path !== "/api/backup/restore")) throw Error("Personal data changed. Reload before making more changes.");
+  const epoch = knownDataEpoch;
+  if (writing) {activeWrites++; syncBackupControls();}
+  try {
+    const result = await apiRequest(path, data, options);
+    if (epochReloading || (epoch && knownDataEpoch !== epoch)) throw Error("Personal data changed. Reload before making more changes.");
+    return result;
+  } finally {if (writing) {activeWrites--; syncBackupControls();}}
+}
+async function apiRequest(path, data, options = {}) {
   const opts =
     data === undefined
       ? {}
@@ -244,7 +332,9 @@ async function loadState(initial = false) {
   const sequence = ++stateSequence, generation = stateGeneration;
   const next = await api("/api/state");
   if (sequence !== stateSequence || generation !== stateGeneration) return;
+  if (!acceptDataEpoch(next)) return;
   state = next;
+  syncBackupControls();
   for (const controller of inventoryRows.values()) controller.refreshRequired = false;
   csrf = state.csrf;
   $("mode").textContent =
@@ -297,8 +387,13 @@ function renderSources() {
         "No market evidence yet. Choose realms and refresh, or import your offline files in Settings.",
       ),
     );
+  const evidence = el("details");
+  if (state.sources.length) {
+    evidence.append(el("summary", `${state.sources.length} saved source snapshots`));
+    target.append(evidence);
+  }
   for (const s of state.sources)
-    target.append(
+    evidence.append(
       el(
         "p",
         `${s.source}: ${s.mode.startsWith("offline") ? "Offline evidence" : "Source snapshot"} • age ${age(s.source_time)} • source ${s.source_time || "unknown"} • fetched ${s.fetched_at} • snapshot ${s.snapshot_id}`,
@@ -332,19 +427,48 @@ function renderSources() {
     if (source.startsWith("realm:us:")) return `Realm ${source.split(":")[2]}`;
     return "Source";
   };
-  for (const [source, status] of Object.entries(state.refresh.sources || {})) {
+  const refresh = state.refresh, entries = Object.entries(refresh.sources || {});
+  const houses = entries.filter(([key]) => key.startsWith("auctions:us:"));
+  const finalized = houses.filter(([,value]) => ["success", "failed", "skipped"].includes(value.state)).length;
+  const seconds = Math.max(0, Math.floor(Number(refresh.elapsed_seconds) || 0));
+  const elapsed = seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
+  const phases = {valuations:"Regional valuations", realms:"Realm discovery", classification:"Classification", collections:"Toy and decor classification", auctions:"Auction houses", auction_fetch:"Downloading auction houses", metadata:"Item and pet details", publication:"Saving auction snapshots", complete:"Refresh complete", failed:"Refresh stopped"};
+  const summary = $("refresh-summary");
+  summary.setAttribute?.("aria-live", "polite");
+  summary.setAttribute?.("role", "status");
+  summary.textContent = refresh.phase || refresh.running
+    ? `${phases[refresh.phase] || "Refreshing sources"} • ${elapsed} elapsed${houses.length ? ` • ${finalized} of ${houses.length} houses finalized` : ""}${refresh.running && refresh.total ? ` • ${refresh.completed || 0} of ${refresh.total} phase steps` : ""}`
+    : "Source evidence and refresh progress";
+  const completed = el("details");
+  const completeCount = houses.filter(([,value]) => value.state === "success" && !value.metadata_error_code && !value.metadata_deferred && !value.metadata_failed).length;
+  if (completeCount) {
+    completed.append(el("summary", `${completeCount} completed auction house${completeCount === 1 ? "" : "s"}`));
+    target.append(completed);
+  }
+  for (const [source, status] of entries) {
     const failed = status.state === "failed" || status.state === "skipped";
     const detail = failed ? messages[status.error_code] || messages.source_error : "";
     const httpStatus = Number.isInteger(status.http_status) && status.http_status >= 100 && status.http_status <= 599 ? ` (HTTP ${status.http_status})` : "";
-    target.append(
-      el(
-        "p",
-        `${sourceLabel(source)}: ${status.state}${detail ? ` — ${detail}${httpStatus}` : ""}${status.metadata_skipped ? " • Metadata limit reached; refresh again to enrich remaining items." : ""}${status.pending ? ` • ${status.pending} classification lookups pending; refresh again to continue.` : ""}${status.using_cached_items ? " • Retained known classifications; new membership remains unverified." : ""}`,
-      ),
-    );
+    const counts = [];
+    if (status.classification === "item_metadata") counts.push("Classified from item details");
+    if (status.known_items !== undefined) counts.push(`${status.known_items} known items`);
+    if (status.details_attempted !== undefined) counts.push(`${status.details_attempted} detail lookups attempted`);
+    if (status.details_fetched !== undefined) counts.push(`${status.details_fetched} details fetched`);
+    if (status.pending) counts.push(`${status.pending} classification lookups pending; ${refresh.running ? "continuing this refresh" : "refresh again to continue"}`);
+    if (status.unavailable) counts.push(`${status.unavailable} unavailable upstream (permanent missing resources; excluded from pending lookups)`);
+    if (status.failed && !failed) counts.push(`${status.failed} lookups need another attempt; ${messages[status.error_code] || "Refresh again to retry temporary lookup failures."}`);
+    if (status.phase) counts.push(phases[status.phase] || "Working");
+    const progress = status.progress || status;
+    if (progress.total) counts.push(`${progress.completed || 0} of ${progress.total} lookups complete${progress.pending ? `, ${progress.pending} pending` : ""}`);
+    if (status.metadata_fetched) counts.push(`${status.metadata_fetched} item details fetched`);
+    if (status.metadata_skipped) counts.push(`${status.metadata_skipped} item details still pending`);
+    if (status.metadata_failed) counts.push(`${status.metadata_failed} item detail lookups need retry`);
+    if (status.metadata_deferred) counts.push(`${status.metadata_deferred} item detail lookups deferred`);
+    if (status.metadata_error_code) counts.push(`Item classification incomplete: ${messages[status.metadata_error_code] || messages.source_error}`);
+    if (status.using_cached_items) counts.push("Retained known classifications; new membership remains unverified.");
+    const paragraph = el("p", `${sourceLabel(source)}: ${status.state}${detail ? ` — ${detail}${httpStatus}` : ""}${counts.length ? ` • ${counts.join(" • ")}` : ""}`, failed || status.failed || status.metadata_error_code || status.metadata_deferred || status.metadata_failed ? "source-failure" : "source-progress");
+    (source.startsWith("auctions:us:") && status.state === "success" && !status.metadata_error_code && !status.metadata_deferred && !status.metadata_failed ? completed : target).append(paragraph);
   }
-  if (state.refresh.running)
-    target.append(el("p", "Refreshing sources… Polling progress."));
 }
 function populateDestinations() {
   const old = $("destination").value;
@@ -1588,6 +1712,7 @@ $("correction-fields").onchange = () => {
 (async () => {
   try {
     await loadState(true);
+    showRestoreNotice();
     outcomeFields();
     await loadResults();
     await loadShopping();
@@ -1618,13 +1743,19 @@ $("correction-fields").onchange = () => {
     message(error.message, true);
   }
 })();
+initializeBackupControls();
 let refreshPollRunning = false;
 setInterval(async () => {
   if (!state?.refresh.running || refreshPollRunning) return;
   refreshPollRunning = true;
   try {
-    await loadState();
+    state.refresh = await api("/api/refresh/status");
+    renderSources();
+    syncBackupControls();
+    $("refresh").disabled = state.mode === "offline-demo" || state.refresh.running;
+    $("refresh").textContent = state.refresh.running ? "Refreshing sources…" : "Refresh sources";
     if (!state.refresh.running) {
+      await loadState();
       retireResults();
       message(
         "Refresh completed. Inspect source errors and source ages before selecting.",

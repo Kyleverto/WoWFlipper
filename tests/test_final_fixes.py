@@ -27,9 +27,10 @@ def test_refresh_shared_metadata_competition(tmp_path,buy_house,sell_house,cache
             price=7000000 if house==buy_house else 9000000
             return Snapshot(f'auctions:us:{house}',now,now,None,'fixture',tuple(Auction('us',house,i,7,1,price,None) for i in range(1,4)))
         def item(self,item): self.calls.append(item); return {'category':'recipe','tradeability':True}
-    client=Client(); cache_calls=[]; original=repo.cache_fresh
-    def cache(key,age): cache_calls.append(key); return original(key,age)
-    repo.cache_fresh=cache
+    client=Client(); cache_calls=[]; original=repo.cache_fresh_many
+    def cache(keys,age):
+        keys=list(keys); cache_calls.extend(keys); return original(keys,age)
+    repo.cache_fresh_many=cache
     RefreshService(repo,client,TSM()).run(settings)
     rows=MarketQuery(repo).rows({})
     assert rows[0]['comparisons'][0]['listing_count']==3

@@ -1,6 +1,6 @@
 """Loopback-only browser adapter. Never exposes upstream exception bodies."""
 from .realms import selectable_us_realm
-import csv, io, os, secrets, json
+import copy, csv, io, os, secrets, json, threading
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -20,6 +20,12 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
     app.config.update(TESTING=testing,SECRET_KEY=secrets.token_hex(32),MAX_CONTENT_LENGTH=16*1024*1024,SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE='Strict')
     repo=Repository(data_dir); refresh=RefreshService(repo,BlizzardClient())
     app.extensions['repository']=repo; app.extensions['refresh']=refresh
+    mutation_lock=threading.RLock()
+    app.extensions['mutation_lock']=mutation_lock
+    if not repo.cache_get('data_epoch'): repo.cache_put('data_epoch',secrets.token_hex(16))
+    def backups():
+        from .backup import BackupService
+        return BackupService(repo)
     def market():
         if 'market' not in g: g.market=MarketQuery(repo)
         return g.market
@@ -36,12 +42,22 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
             canonical=parsed.hostname+(f':{port}' if port is not None else '')
             if canonical!=request.host: return jsonify(error='Invalid local host'),403
         except ValueError: return jsonify(error='Invalid local host'),403
+        if request.method not in ('GET','HEAD','OPTIONS') or request.path in ('/api/state','/api/backup'):
+            # Restore and all writes share a gate. Check the dataset token after
+            # acquiring it: another request's cookie may have decoded before restore.
+            mutation_lock.acquire()
+            g.mutation_locked=True
         if request.method not in ('GET','HEAD','OPTIONS'):
+            if session.get('data_epoch') != repo.cache_get('data_epoch'):
+                return jsonify(error='Local data changed. Reload this page before making changes.'),403
             origin=request.headers.get('Origin')
             if origin and origin!='http://'+request.host: return jsonify(error='External origins cannot change local data'),403
             if request.headers.get('Sec-Fetch-Site') in ('cross-site','same-site'): return jsonify(error='External sites cannot change local data'),403
             expected=session.get('csrf')
             if not expected or not secrets.compare_digest(request.headers.get('X-CSRF-Token',''),expected): return jsonify(error='Reload this page to renew its local security token'),403
+    @app.teardown_request
+    def release_mutation_lock(exc):
+        if g.pop('mutation_locked',False): mutation_lock.release()
     @app.after_request
     def headers(response):
         response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
@@ -57,13 +73,40 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
         data=request.get_json(silent=True)
         if not isinstance(data,dict) or set(data)-set(allowed): raise ValueError('Unknown or invalid request fields')
         return data
+    def refresh_snapshot():
+        snapshot=getattr(refresh,'status_snapshot',None)
+        return snapshot() if callable(snapshot) else copy.deepcopy(refresh.status)
     @app.get('/')
     def index(): return render_template('index.html')
     @app.get('/api/state')
     def state():
+        epoch=repo.cache_get('data_epoch')
+        if session.get('data_epoch') != epoch:
+            session.clear()
+            session['data_epoch']=epoch
         session.setdefault('csrf',secrets.token_urlsafe(32))
         sources=repo.latest_metadata()
-        return jsonify(safe({'csrf':session['csrf'],'settings':repo.load_settings().to_dict(),'resale_overrides':list(repo.load_resale_overrides().values()),'realms':repo.cache_get('realms') or [],'mode':repo.cache_get('mode') or 'live','sources':sources,'refresh':refresh.status,'credentials_configured':bool(os.environ.get('BLIZZARD_CLIENT_ID') and os.environ.get('BLIZZARD_CLIENT_SECRET')),'summary':portfolio().summary(),'history':portfolio().history()}))
+        return jsonify(safe({'csrf':session['csrf'],'data_epoch':epoch,'settings':repo.load_settings().to_dict(),'resale_overrides':list(repo.load_resale_overrides().values()),'realms':repo.cache_get('realms') or [],'mode':repo.cache_get('mode') or 'live','sources':sources,'refresh':refresh_snapshot(),'credentials_configured':bool(os.environ.get('BLIZZARD_CLIENT_ID') and os.environ.get('BLIZZARD_CLIENT_SECRET')),'summary':portfolio().summary(),'history':portfolio().history()}))
+    @app.get('/api/backup')
+    def download_backup():
+        document=backups().export()
+        return Response(json.dumps(document,ensure_ascii=False),mimetype='application/json',headers={
+            'Content-Disposition':'attachment; filename=wowflipper-personal-backup.json'})
+    @app.post('/api/backup/preview')
+    def preview_backup():
+        data=body(['backup'])
+        return jsonify(safe(backups().preview(data.get('backup'))))
+    @app.post('/api/backup/restore')
+    def restore_backup():
+        data=body(['backup'])
+        if refresh_snapshot().get('running'):
+            return jsonify(error='Wait for the current source refresh to finish before restoring a backup.'),409
+        result=backups().restore(data.get('backup'))
+        # Invalidate old tabs and requests. The epoch check above also protects
+        # requests that decoded a previously valid cookie while waiting on the gate.
+        app.config['SECRET_KEY']=secrets.token_hex(32)
+        session.clear()
+        return jsonify(safe({'restored':True,**result}))
     @app.get('/api/resale-overrides')
     def resale_overrides(): return jsonify(list(repo.load_resale_overrides().values()))
     @app.post('/api/resale-overrides')
@@ -103,7 +146,7 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
         if repo.cache_get('mode')=='offline-demo': raise ValueError('Offline demo cannot refresh live sources. Start without --demo to use live data.')
         refresh.start(repo.load_settings()); return jsonify(started=True),202
     @app.get('/api/refresh/status')
-    def refresh_status(): return jsonify(refresh.status)
+    def refresh_status(): return jsonify(safe(refresh_snapshot()))
     @app.get('/api/results')
     def results(): return jsonify(market().page(request.args))
     @app.get('/api/exclusions')

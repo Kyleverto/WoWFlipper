@@ -28,9 +28,9 @@ def test_decor_details_link_plural_object_and_incremental_cache(tmp_path):
             return response({'decor_items':[{'id':533,'name':'Sturdy Wooden Interior Pillar'},{'id':534}]})
         return response({'id':533,'items':{'id':245392}}) if '/533?' in url else response({'id':534,'items':{'id':245393}})
     client=blizzard(transport)
-    assert client.decor_items(repo,limit=1)=={'items':[245392],'pending':1,'details_fetched':1}
-    assert client.decor_items(repo,limit=1)=={'items':[245392,245393],'pending':0,'details_fetched':1}
-    assert client.decor_items(repo)=={'items':[245392,245393],'pending':0,'details_fetched':0}
+    assert client.decor_items(repo,limit=1)=={'items':[245392],'pending':1,'details_fetched':1,'details_attempted':1,'unavailable':0,'errors':0}
+    assert client.decor_items(repo,limit=1)=={'items':[245392,245393],'pending':0,'details_fetched':1,'details_attempted':1,'unavailable':0,'errors':0}
+    assert client.decor_items(repo)=={'items':[245392,245393],'pending':0,'details_fetched':0,'details_attempted':0,'unavailable':0,'errors':0}
     assert len(calls)==3 and all('namespace=static-us' in url for url in calls)
 
 
@@ -45,10 +45,12 @@ def test_decor_discovery_bounded_and_retains_progress_after_failure(tmp_path):
     client=blizzard(transport)
     first=client.decor_items(repo,limit=500)
     assert first['details_fetched']==50 and first['pending']==4
-    with pytest.raises(ValueError): client.decor_items(repo)
+    second=client.decor_items(repo)
+    assert second['details_fetched']==3 and second['errors']==1 and second['pending']==1
     state=repo.cache_get('decor:us')
-    assert len(state['items'])==51 and state['remaining']==[52,53,54]
-    assert len(calls)==53
+    assert len(state['items'])==53 and state['remaining']==[52]
+    assert state['failures']['52']=={'error_code':'invalid_schema','attempts':1}
+    assert len(calls)==55
 
 
 @pytest.mark.parametrize('data,expected',[
@@ -120,7 +122,7 @@ def test_refresh_species_cache_shared_destination_and_source_failure(tmp_path):
     settings=replace(Settings(),categories=('decor','battle-pet'),selling_realms=('away',))
     result=RefreshService(repo,client,tsm).run(settings)
     assert result['sources']['tsm-pets:us']['state']=='failed'
-    assert client.calls==[('pet',39),('pet',40),('item',245392)]
+    assert sorted(client.calls)==sorted([('pet',39),('pet',40),('item',245392)])
     assert repo.cache_fresh('pet:us:39',100)['name']=='Pet 39'
     assert repo.cache_fresh('item:us:82800',100) is None
     for house in (1,2):
@@ -152,7 +154,7 @@ def test_pet_metadata_bound_is_by_species_not_listing(tmp_path):
     assert result['sources']['auctions:us:1']['pet_metadata_unknown']==3
 
 
-def test_discovery_failure_keeps_decor_and_toy_membership(tmp_path):
+def test_toy_discovery_failure_keeps_toy_membership_and_cached_decor_fallback(tmp_path):
     repo,client,tsm=fixture(tmp_path)
     repo.cache_put('decor:us',{'items':[245392],'remaining':[534]})
     repo.cache_put('toys:us',{'items':[245392],'remaining':[]})
@@ -162,14 +164,15 @@ def test_discovery_failure_keeps_decor_and_toy_membership(tmp_path):
     settings=replace(Settings(),categories=('decor','toy'))
     result=RefreshService(repo,client,tsm).run(settings)
     assert tsm.calls==[]
-    assert result['sources']['decor:us']['using_cached_items'] is True
+    assert result['sources']['decor:us']=={'state':'success','classification':'item_metadata','known_items':1}
+    assert result['sources']['toys:us']['using_cached_items'] is True
     assert repo.latest('auctions:us:1').records[-1].category=='decor'
 
 
 def test_cached_unknown_housing_classifies_without_waiting_for_index(tmp_path):
     repo,client,tsm=fixture(tmp_path)
     repo.cache_timed('item:us:245392',{'category':'unknown','item_class':{'id':20},'item_subclass':{'id':0},'tradeability':True})
-    client.decor_items=lambda repo:{'items':[],'pending':1000,'details_fetched':0}
+    client.decor_items=lambda repo:{'items':[],'pending':1000,'details_fetched':0,'details_attempted':0,'unavailable':0,'errors':0}
     RefreshService(repo,client,tsm).run(replace(Settings(),categories=('decor',)))
     assert client.calls==[]
     assert repo.latest('auctions:us:1').records[-1].category=='decor'
@@ -216,4 +219,4 @@ def test_expired_legacy_toy_progress_survives_successful_new_index(tmp_path):
     repo.cache_put('timed:toys:us',{'cached_at':0,'value':{'items':[123],'remaining':[8]}})
     sequence=[response({'toys':[{'id':8}]}),response({'id':8,'item':{'id':456}})]
     result=blizzard(lambda *args:sequence.pop(0)).toy_items(repo)
-    assert result=={'items':[123,456],'pending':0}
+    assert result=={'items':[123,456],'pending':0,'details_fetched':1,'details_attempted':1,'unavailable':0,'errors':0}

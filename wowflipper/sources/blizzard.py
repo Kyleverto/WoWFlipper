@@ -4,7 +4,9 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
-from .http import HTTPClient, SourceError, http_status_error
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import RLock
+from .http import HTTPClient, SourceError, http_status_error, source_diagnostic
 from ..models import Snapshot, normalize_auction, integer
 
 class BlizzardClient:
@@ -13,6 +15,7 @@ class BlizzardClient:
         self.client_id=client_id or os.getenv('BLIZZARD_CLIENT_ID')
         self.client_secret=client_secret or os.getenv('BLIZZARD_CLIENT_SECRET')
         self.clock=clock; self._token=None; self._expires=0
+        self._auth_lock=RLock()
 
     def _authenticate(self):
         if not self.client_id or not self.client_secret: raise SourceError('Blizzard credentials are not configured', code='auth_missing')
@@ -31,11 +34,18 @@ class BlizzardClient:
         return data
 
     def _get(self,path,static=False,headers=None):
-        if not self._token or self.clock()>=self._expires: self._authenticate()
+        with self._auth_lock:
+            if not self._token or self.clock()>=self._expires: self._authenticate()
+            token=self._token
         url='https://us.api.blizzard.com'+path+'?namespace='+('static-us' if static else 'dynamic-us')+'&locale=en_US'
         for attempt in range(2):
-            response=self.http.request('GET',url,{'Authorization':'Bearer '+self._token,**(headers or {})})
-            if response.status==401 and attempt==0: self._authenticate(); continue
+            response=self.http.request('GET',url,{'Authorization':'Bearer '+token,**(headers or {})})
+            if response.status==401 and attempt==0:
+                with self._auth_lock:
+                    # Another request may already have replaced the rejected token.
+                    if self._token==token: self._authenticate()
+                    token=self._token
+                continue
             if response.status not in {200,304}: raise http_status_error(response.status)
             return response
 
@@ -60,23 +70,30 @@ class BlizzardClient:
         except (KeyError,TypeError): raise ValueError('Invalid connected realm index') from None
         return houses
 
-    def realms(self):
+    def realms(self,progress=None):
         houses=self.connected_realm_ids()
         data=self._json(self._get('/data/wow/realm/index'))
         if not isinstance(data.get('realms'),list) or not data['realms']: raise ValueError('Invalid realms schema')
-        result=[]
-        for realm in data['realms']:
+        def discover(realm):
             detail=self._json(self._get('/data/wow/realm/'+realm['slug']))
             href=detail.get('connected_realm',{}).get('href')
             house=self._connected_house(href) if href else None
             # The us namespace includes Oceanic/Brazil/Latin America. Only the
             # official realm detail category establishes United States membership.
-            result.append({**realm,'house_id':house,
+            return {**realm,'house_id':house,
                 'category':detail.get('category'), 'locale':detail.get('locale'),
                 'timezone':detail.get('timezone'),
                 'is_us':detail.get('category') == 'United States',
                 'is_auction_realm':house in houses,
-                'is_tournament':detail.get('is_tournament',False)})
+                'is_tournament':detail.get('is_tournament',False)}
+        realms=data['realms']; result=[None]*len(realms); completed=0
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            # Keep both active requests and queued work bounded.
+            for start in range(0,len(realms),4):
+                futures={pool.submit(discover,realm):start+offset for offset,realm in enumerate(realms[start:start+4])}
+                for future in as_completed(futures):
+                    result[futures[future]]=future.result(); completed+=1
+                    if progress: progress({'completed':completed,'total':len(realms),'pending':len(realms)-completed,'failed':0,'unavailable':0})
         return result
 
     def item(self,item_id):
@@ -87,7 +104,8 @@ class BlizzardClient:
         elif class_id==15 and subclass==5: category='mount'
         elif class_id==20 and subclass==0: category='decor'
         # The item endpoint does not reliably establish toy membership or tradeability.
-        binding=data.get('binding',{}).get('type')
+        binding=data.get('binding')
+        binding=binding.get('type') if isinstance(binding,dict) else None
         return {**data,'category':category,'tradeability':False if binding=='ON_ACQUIRE' else True if binding in {'ON_EQUIP','ON_USE'} else None}
 
     def auctions(self,house_id,previous=None):
@@ -129,43 +147,90 @@ class BlizzardClient:
             raise ValueError('Invalid pet species tradeability')
         return {**data,'category':'battle-pet','tradeability':data['is_tradable'] and data['is_battlepet']}
 
-    def toy_items(self,repository,limit=50):
-        return self._collectible_items(repository,'toy','toys','item',limit)
+    def toy_items(self,repository,limit=50,progress=None):
+        return self._collectible_items(repository,'toy','toys','item',limit,progress)
 
-    def decor_items(self,repository,limit=50):
-        # Decor IDs are collection identifiers. Only the plural items object in
-        # a decor detail establishes which auction item belongs to the index.
-        return self._collectible_items(repository,'decor','decor_items','items',limit)
+    def decor_items(self,repository,limit=50,progress=None):
+        # Decor IDs are collection identifiers; only detail items establish membership.
+        return self._collectible_items(repository,'decor','decor_items','items',limit,progress)
 
-    def _collectible_items(self,repository,kind,index_field,item_field,limit):
+    def _collectible_items(self,repository,kind,index_field,item_field,limit,progress=None):
         key=f'{"toys" if kind == "toy" else "decor"}:us'
         legacy=repository.cache_get('timed:'+key) or {}
-        state=repository.cache_get(key) or legacy.get('value')
+        state=repository.cache_get(key) or legacy.get('value') or {}
+        state={**state,'items':list(state.get('items',[])),
+               'remaining':list(state.get('remaining',[])),
+               'resolved':dict(state.get('resolved',{})),
+               'failures':dict(state.get('failures',{})),
+               'unavailable':dict(state.get('unavailable',{}))}
         fresh=repository.cache_fresh(key+':index',7*86400)
+        dirty=False
         if fresh is None:
             data=self._json(self._get(f'/data/wow/{kind}/index',static=True))
             entries=data.get(index_field)
             if not isinstance(entries,list): raise ValueError(f'Invalid {kind} index')
             try: ids=sorted({integer(entry['id'],1) for entry in entries})
             except (KeyError,TypeError,ValueError): raise ValueError(f'Invalid {kind} index') from None
-            state=state or {'items':[],'remaining':[],'resolved':{}}
-            resolved=state.get('resolved',{})
-            state={**state,'remaining':[identity for identity in ids if str(identity) not in resolved]}
-            repository.cache_put(key,state)
+            # Reconsider unavailable details only when the weekly index is refreshed.
+            state['remaining']=[identity for identity in ids if str(identity) not in state['resolved']]
+            state['unavailable']={}
+            state['failures']={identity:error for identity,error in state['failures'].items() if int(identity) in ids}
             repository.cache_timed(key+':index',{'ids':ids})
-        state=state or {'items':[],'remaining':[],'resolved':{}}
-        fetched=0
-        for identity in state['remaining'][:max(0,min(integer(limit),50))]:
+            dirty=True
+        fetched=attempted=errors=0
+        selected=state['remaining'][:max(0,min(integer(limit),50))]
+        total=len(state['resolved'])+len(state['remaining'])+len(state['unavailable'])
+        def detail(identity):
             data=self._json(self._get(f'/data/wow/{kind}/{identity}',static=True))
-            try: item_id=integer(data[item_field]['id'],1)
+            try: return integer(data[item_field]['id'],1)
             except (KeyError,TypeError,ValueError): raise ValueError(f'Invalid {kind} item link') from None
-            state['items']=sorted(set(state['items'])|{item_id})
-            state.setdefault('resolved',{})[str(identity)]=item_id
-            state['remaining'].remove(identity)
+        def persist():
             repository.cache_put(key,state)
             repository.cache_timed(key,state)
-            fetched+=1
-        # Preserve the legacy toy return shape for existing adapter callers.
-        result={'items':state['items'],'pending':len(state['remaining'])}
-        if kind == 'decor': result['details_fetched']=fetched
+        def notify():
+            if progress:
+                progress({'completed':len(state['resolved']),'total':total,
+                          'pending':len(state['remaining']),'failed':len(state['failures']),
+                          'unavailable':len(state['unavailable']),'attempted':attempted})
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for start in range(0,len(selected),4):
+                futures={pool.submit(detail,identity):identity for identity in selected[start:start+4]}
+                stop_error=None
+                for future in as_completed(futures):
+                    identity=futures[future]; identity_key=str(identity); attempted+=1
+                    state['remaining'].remove(identity)
+                    try:
+                        item_id=future.result()
+                    except Exception as error:
+                        # Keep only allowlisted diagnostics, never upstream messages or payloads.
+                        diagnostic=source_diagnostic(error)
+                        diagnostic.pop('error',None)
+                        previous=state['failures'].get(identity_key,{})
+                        diagnostic['attempts']=previous.get('attempts',0)+1
+                        if isinstance(error,SourceError) and error.status==404:
+                            state['unavailable'][identity_key]=diagnostic
+                            state['failures'].pop(identity_key,None)
+                        else:
+                            state['failures'][identity_key]=diagnostic
+                            # Move retries behind untouched work so a bad ID cannot starve it.
+                            state['remaining'].append(identity)
+                        if isinstance(error,SourceError) and error.code in {'auth_missing','auth_denied','rate_limited'}:
+                            stop_error=stop_error or error
+                        errors+=1
+                    else:
+                        state['items']=sorted(set(state['items'])|{item_id})
+                        state['resolved'][identity_key]=item_id
+                        state['failures'].pop(identity_key,None)
+                        fetched+=1
+                persist(); dirty=False
+                notify()
+                # Authentication and rate limits affect the entire source. Finish
+                # this bounded batch so healthy results survive, then defer the
+                # untouched queue instead of repeating a global failure per ID.
+                if stop_error is not None: raise stop_error
+        if dirty: persist()
+        if not selected: notify()
+        result={'items':state['items'],'pending':len(state['remaining']),
+                'details_fetched':fetched,'details_attempted':attempted,
+                'unavailable':len(state['unavailable']),'errors':errors}
         return result

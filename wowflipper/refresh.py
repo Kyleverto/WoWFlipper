@@ -1,13 +1,14 @@
 """One refresh worker with pollable status and per-house failure isolation."""
 from dataclasses import replace
-import json, threading
+import copy, inspect, json, threading, time
+from itertools import islice
 from datetime import datetime, timezone
 from .engine import exclusion_reason
 from .models import is_fresh
 from .identity import pet_details, override_key
 from .realms import auction_realm
-from .sources.http import source_diagnostic
-from concurrent.futures import ThreadPoolExecutor
+from .sources.http import SourceError, source_diagnostic
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 class RefreshService:
     def __init__(self,repository,client,tsm_client=None):
@@ -16,19 +17,63 @@ class RefreshService:
         self.tsm_client=tsm_client or TSMClient()
         self._lock=threading.Lock(); self._worker=ThreadPoolExecutor(max_workers=1)
         self.status={'running':False,'sources':{}}
+        self._started=None; self._phase_started=None
+    def status_snapshot(self):
+        # Copy each mutable mapping before iteration; fetch workers replace source
+        # entries while the web worker polls. Never expose those live mappings.
+        status=self.status.copy()
+        status['sources']={key:copy.deepcopy(value.copy()) for key,value in status['sources'].copy().items()}
+        status['phase_seconds']=status.get('phase_seconds',{}).copy()
+        if self._started is not None and status.get('running'):
+            status['elapsed_seconds']=round(time.monotonic()-self._started,3)
+            if self._phase_started is not None:
+                status['phase_seconds'][status['phase']]=round(time.monotonic()-self._phase_started,3)
+        return status
+    def _begin(self):
+        self._started=time.monotonic(); self._phase_started=None
+        self.status={'running':True,'sources':{},'started_at':datetime.now(timezone.utc).isoformat(),
+            'elapsed_seconds':0,'completed':0,'total':0,'phase_seconds':{}}
+        self._phase('valuations')
+    def _phase(self,name,total=0):
+        now=time.monotonic()
+        if self._phase_started is not None:
+            self.status['phase_seconds']={**self.status['phase_seconds'],self.status['phase']:round(now-self._phase_started,3)}
+        self._phase_started=now
+        self.status.update(phase=name,completed=0,total=total)
+    def _call_progress(self,method,*args,progress):
+        parameters=inspect.signature(method).parameters
+        if 'progress' in parameters or any(p.kind==inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+            return method(*args,progress=progress)
+        return method(*args)
+    def _discover_collection(self,method,key):
+        fetched=attempted=0; previous=None
+        def progress(update):
+            self.status['sources'][key]={**self.status['sources'].get(key,{}),**update,'state':'running'}
+        for batch in range(50):
+            state=self._call_progress(method,self.repository,progress=progress)
+            fetched+=state.get('details_fetched',0); attempted+=state.get('details_attempted',0)
+            observed=self.status['sources'].get(key,{})
+            marker=(state['pending'],len(state['items']),state.get('failed',observed.get('failed',0)),state.get('unavailable',0))
+            self.status['sources'][key]={**observed,'state':'running',**{k:v for k,v in state.items() if k!='items'},
+                'known_items':len(state['items']),'details_fetched':fetched,'details_attempted':attempted,'batches':batch+1}
+            if not state['pending'] or state.get('actionable_pending')==0 or marker==previous: break
+            previous=marker
+        partial=bool(self.status['sources'][key].get('failed') or state.get('unavailable') or state.get('errors'))
+        self.status['sources'][key].update(state='partial' if partial else 'pending' if state['pending'] else 'success')
+        return state
     def start(self,settings):
         if not self._lock.acquire(blocking=False): raise RuntimeError('Refresh already running')
-        self.status={'running':True,'sources':{}}
+        self._begin()
         return self._worker.submit(self._run,settings)
     def run(self,settings):
         if not self._lock.acquire(blocking=False): raise RuntimeError('Refresh already running')
-        self.status={'running':True,'sources':{}}
+        self._begin()
         return self._run(settings)
     def _run(self,settings):
         try:
             self.repository.save_settings(settings)
             try:
-                snapshot=self.tsm_client.region(self.repository.latest('tsm:us'))
+                snapshot=self.tsm_client.region(self.repository.latest('tsm:us',include_payload=False))
                 identity=self.repository.publish(snapshot)
                 self.status['sources']['tsm:us']={'state':'success','snapshot_id':identity,**(snapshot.source_metadata or {})}
                 if self.repository.maintenance_warning: self.status['sources']['tsm:us']['maintenance_warning']=self.repository.maintenance_warning
@@ -36,12 +81,13 @@ class RefreshService:
                 self.status['sources']['tsm:us']={'state':'failed',**source_diagnostic(exc)}
             if 'battle-pet' in settings.categories:
                 try:
-                    snapshot=self.tsm_client.pets(self.repository.latest('tsm-pets:us'))
+                    snapshot=self.tsm_client.pets(self.repository.latest('tsm-pets:us',include_payload=False))
                     identity=self.repository.publish(snapshot)
                     self.status['sources']['tsm-pets:us']={'state':'success','snapshot_id':identity,**(snapshot.source_metadata or {})}
                     if self.repository.maintenance_warning: self.status['sources']['tsm-pets:us']['maintenance_warning']=self.repository.maintenance_warning
                 except Exception as exc:
                     self.status['sources']['tsm-pets:us']={'state':'failed',**source_diagnostic(exc)}
+            self._phase('realms')
             selected=set(settings.buying_realms)|set(settings.selling_realms)
             cached_realms=self.repository.cache_get('realms') or []
             realms=cached_realms
@@ -55,7 +101,8 @@ class RefreshService:
                     self.repository.cache_put('realms',realms)
                     self.repository.cache_timed('realms',realms)
                 elif not fresh or any('category' not in realm or not isinstance(realm.get('is_auction_realm'),bool) for realm in fresh):
-                    realms=self.client.realms()
+                    def realm_progress(update): self.status['sources']['realms:us']={'state':'running',**update}
+                    realms=self._call_progress(self.client.realms,progress=realm_progress)
                     self.repository.cache_put('realms',realms)
                     self.repository.cache_timed('realms',realms)
                 else: realms=fresh
@@ -78,40 +125,69 @@ class RefreshService:
                 key=f'auctions:us:{house}' if house else f'realm:us:{slug}'
                 status=self.status['sources'].setdefault(key,{'state':'skipped','error_code':code,'realms':[]})
                 status['realms'].append(slug)
+            self._phase('collections',sum(category in settings.categories for category in ('toy','decor')))
             collections={}
             for category,method,key in [('toy','toy_items','toys:us'),('decor','decor_items','decor:us')]:
                 legacy=self.repository.cache_get('timed:'+key) or {}
                 cached=self.repository.cache_get(key) or legacy.get('value') or {}
                 state={'items':cached.get('items',[]),'pending':len(cached.get('remaining',[]))}
-                if category in settings.categories and hasattr(self.client,method):
+                if category=='decor' and category in settings.categories:
+                    # Item class 20/subclass 0 establishes decor directly. A full
+                    # decor catalog crawl adds no required evidence to those rows.
+                    # Retain existing catalog membership for older cached metadata.
+                    self.status['sources'][key]={'state':'success','classification':'item_metadata',
+                        'known_items':len(state['items'])}
+                elif category in settings.categories and hasattr(self.client,method):
                     try:
-                        state=getattr(self.client,method)(self.repository)
-                        self.status['sources'][key]={'state':'pending' if state['pending'] else 'success',
-                            'pending':state['pending'],'known_items':len(state['items']),
-                            **({'details_fetched':state['details_fetched']} if 'details_fetched' in state else {})}
+                        state=self._discover_collection(getattr(self.client,method),key)
                     except Exception as exc:
                         retained=self.repository.cache_get(key) or self.repository.cache_fresh(key,7*86400) or cached
                         state={'items':retained.get('items',[]),'pending':len(retained.get('remaining',[]))}
-                        self.status['sources'][key]={'state':'failed',**source_diagnostic(exc),
+                        self.status['sources'][key]={**self.status['sources'].get(key,{}),'state':'failed',**source_diagnostic(exc),
                             'using_cached_items':bool(state['items']),'known_items':len(state['items']),'pending':state['pending']}
                         if category=='decor':
                             self.status['sources'][key]['details_fetched']=max(0,len(retained.get('resolved',{}))-len(cached.get('resolved',{})))
                 collections[category]=set(state['items'])
-            tsm=self.repository.latest('tsm:us')
+                if category in settings.categories: self.status['completed']+=1
+            tsm=self.repository.latest('tsm:us',include_payload=False)
             # Fetch each house once, then discover buy identities before enriching any
             # destination. Shared item metadata is independent of ask and house order.
             values={r.item_id:r for r in tsm.records} if tsm else {}
-            pet_snapshot=self.repository.latest('tsm-pets:us')
+            pet_snapshot=self.repository.latest('tsm-pets:us',include_payload=False)
             pet_values={r.pet_species_id:r for r in pet_snapshot.records if r.pet_species_id is not None} if pet_snapshot else {}
             snapshots={}; counts={}
             buy_houses={mapping[slug] for slug in settings.buying_realms if slug in mapping}
-            for house in sorted(set(mapping.values())):
+            houses=sorted(set(mapping.values()))
+            self._phase('auction_fetch',len(houses))
+            for house in houses: self.status['sources'][f'auctions:us:{house}']={'state':'queued','phase':'auction_fetch'}
+            def fetch(house):
                 key=f'auctions:us:{house}'
-                try:
-                    snapshots[house]=self.client.auctions(house,self.repository.latest(key))
-                    counts[house]={'metadata_fetched':0,'metadata_skipped':0,'pet_metadata_failed':0,'pet_metadata_unknown':0}
-                except Exception as exc:
-                    self.status['sources'][key]={'state':'failed',**source_diagnostic(exc)}
+                self.status['sources'][key]={'state':'running','phase':'auction_fetch'}
+                return self.client.auctions(house,self.repository.latest(key,include_payload=False))
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                queued=iter(houses); stop_error=None
+                futures={pool.submit(fetch,house):house for house in islice(queued,3)}
+                while futures:
+                    done,_=wait(futures,return_when=FIRST_COMPLETED)
+                    for future in done:
+                        house=futures.pop(future); key=f'auctions:us:{house}'
+                        try:
+                            snapshots[house]=future.result()
+                            counts[house]={'metadata_fetched':0,'metadata_skipped':0,'metadata_failed':0,'pet_metadata_failed':0,'pet_metadata_unknown':0}
+                            self.status['sources'][key]={'state':'running','phase':'metadata'}
+                        except Exception as exc:
+                            self.status['sources'][key]={'state':'failed',**source_diagnostic(exc)}
+                            if isinstance(exc,SourceError) and exc.code in {'auth_missing','auth_denied','rate_limited'}:
+                                stop_error=stop_error or exc
+                        self.status['completed']+=1
+                    if stop_error is None:
+                        for house in islice(queued,3-len(futures)): futures[pool.submit(fetch,house)]=house
+                if stop_error is not None:
+                    for house in queued:
+                        self.status['sources'][f'auctions:us:{house}']={'state':'skipped','phase':'auction_fetch',
+                            'deferred':True,**source_diagnostic(stop_error)}
+                        self.status['completed']+=1
+            self._phase('metadata',len(buy_houses & snapshots.keys()))
             metadata_by_item={}
             def metadata_identity(auction):
                 details=pet_details(auction)
@@ -124,8 +200,11 @@ class RefreshService:
                 for auction in snapshot.records:
                     item=metadata_identity(auction)
                     if item not in metadata_by_item:
-                        metadata_by_item[item]=self.repository.cache_fresh(cache_key(item),7*86400)
-            now=datetime.now(timezone.utc); attempted=set(); pending_by_house={}
+                        metadata_by_item[item]=None
+            cached=self.repository.cache_fresh_many((cache_key(item) for item in metadata_by_item),7*86400)
+            metadata_by_item={item:cached[cache_key(item)] for item in metadata_by_item}
+            now=datetime.now(timezone.utc); attempted=set(); pending_by_house={}; metadata_jobs=[]
+            planned_by_house=dict.fromkeys(snapshots,0)
             resale_overrides=self.repository.load_resale_overrides()
             valuation_fresh=bool(tsm and is_fresh(tsm.source_time,settings.max_tsm_age_hours,now))
             pet_valuation_fresh=bool(pet_snapshot and is_fresh(pet_snapshot.source_time,settings.max_tsm_age_hours,now))
@@ -147,29 +226,59 @@ class RefreshService:
                             metadata={'simple_identity':True,'tradeability':True,**({'pet':details} if pet else {})})
                         override=resale_overrides.get(override_key(auction))
                         if not fresh or not valuation or exclusion_reason(plausible,valuation,settings,now,override): continue
-                        if counts[house]['metadata_fetched']>=100:
+                        if planned_by_house[house]>=100:
                             pending.add(item); continue
                         attempted.add(item)
-                        if pet:
-                            counts[house]['metadata_fetched']+=1
-                            try:
-                                metadata=self.client.pet(item[1])
-                                if not isinstance(metadata,dict) or not isinstance(metadata.get('is_tradable'),bool) or not isinstance(metadata.get('is_battlepet'),bool):
-                                    raise ValueError('Invalid pet metadata')
-                                metadata={**metadata,'category':'battle-pet','tradeability':metadata['is_tradable'] and metadata['is_battlepet']}
-                            except Exception:
-                                counts[house]['pet_metadata_failed']+=1
-                                continue
-                        else:
-                            metadata=self.client.item(item[1])
-                            counts[house]['metadata_fetched']+=1
-                        key=cache_key(item)
-                        self.repository.cache_put(key,metadata); self.repository.cache_timed(key,metadata)
-                        metadata_by_item[item]=metadata
+                        planned_by_house[house]+=1
+                        metadata_jobs.append((item,house))
                     pending_by_house[house]=pending
                 except Exception as exc:
                     self.status['sources'][f'auctions:us:{house}']={'state':'failed',**source_diagnostic(exc)}
                     del snapshots[house]
+                self.status['completed']+=1
+            # Eligibility and house budgets are decided in a stable order above.
+            # Only network requests run in parallel; persistence stays on this
+            # coordinator thread and at most four futures exist at a time.
+            self.status.update(completed=0,total=len(metadata_jobs))
+            def fetch_metadata(item):
+                if item[0]=='item': return self.client.item(item[1])
+                metadata=self.client.pet(item[1])
+                if not isinstance(metadata,dict) or not isinstance(metadata.get('is_tradable'),bool) or not isinstance(metadata.get('is_battlepet'),bool):
+                    raise ValueError('Invalid pet metadata')
+                return {**metadata,'category':'battle-pet','tradeability':metadata['is_tradable'] and metadata['is_battlepet']}
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                jobs=iter(metadata_jobs)
+                stop_error=None
+                def submit_job(job):
+                    item,house=job
+                    counts[house]['metadata_fetched']+=1
+                    return pool.submit(fetch_metadata,item)
+                futures={submit_job(job):job for job in islice(jobs,4)}
+                while futures:
+                    done,_=wait(futures,return_when=FIRST_COMPLETED)
+                    for future in done:
+                        item,house=futures.pop(future)
+                        try: metadata=future.result()
+                        except Exception as exc:
+                            counts[house]['pet_metadata_failed' if item[0]=='pet' else 'metadata_failed']+=1
+                            if isinstance(exc,SourceError) and exc.code in {'auth_missing','auth_denied','rate_limited'}:
+                                stop_error=stop_error or exc
+                                counts[house]['metadata_error_code']=exc.code
+                        else:
+                            try:
+                                key=cache_key(item)
+                                self.repository.cache_put(key,metadata); self.repository.cache_timed(key,metadata)
+                                metadata_by_item[item]=metadata
+                            except Exception as exc:
+                                self.status['sources'][f'auctions:us:{house}']={'state':'failed',**source_diagnostic(exc)}
+                                snapshots.pop(house,None)
+                        self.status['completed']+=1
+                    if stop_error is None:
+                        for job in islice(jobs,4-len(futures)): futures[submit_job(job)]=job
+                if stop_error is not None:
+                    for item,house in jobs:
+                        counts[house]['metadata_deferred']=counts[house].get('metadata_deferred',0)+1
+                        counts[house]['metadata_error_code']=stop_error.code
             for house,pending in pending_by_house.items():
                 counts[house]['metadata_skipped']=sum(metadata_by_item[item] is None for item in pending)
             for item,metadata in metadata_by_item.items():
@@ -179,8 +288,10 @@ class RefreshService:
                             metadata_by_item[item]={**metadata,'category':category}
                     if metadata.get('item_class',{}).get('id') == 20 and metadata.get('item_subclass',{}).get('id') == 0:
                         metadata_by_item[item]={**metadata,'category':'decor'}
-            for house,snapshot in snapshots.items():
+            self._phase('publication',len(snapshots))
+            for house,snapshot in sorted(snapshots.items()):
                 key=f'auctions:us:{house}'
+                self.status['sources'][key]={'state':'running','phase':'publication',**counts[house]}
                 try:
                     records=[]
                     for auction in snapshot.records:
@@ -207,6 +318,10 @@ class RefreshService:
                 except Exception as exc:
                     # Never expose upstream response bodies, headers or credentials.
                     self.status['sources'][key]={'state':'failed',**source_diagnostic(exc)}
+                self.status['completed']+=1
             return self.status
         finally:
-            self.status['running']=False; self._lock.release()
+            completed=self.status.get('completed',0); total=self.status.get('total',0)
+            self._phase('complete',total)
+            self.status.update(completed=completed,running=False,elapsed_seconds=round(time.monotonic()-self._started,3))
+            self._lock.release()

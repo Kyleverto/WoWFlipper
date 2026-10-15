@@ -45,8 +45,19 @@ class Repository:
         if snapshot.records and any(type(r)!=type(snapshot.records[0]) for r in snapshot.records): raise ValueError('Mixed records')
         data=asdict(snapshot); data.pop('raw_payload'); data.pop('id')
         data['record_type']='auction' if snapshot.records and isinstance(snapshot.records[0],Auction) else 'valuation'
-        payload=snapshot.raw_payload or json.dumps(data,default=encode).encode()
-        digest=hashlib.sha256(payload).hexdigest(); data['content_hash']=digest
+        # A conditional 304 carries the original raw content hash even when the
+        # refresh worker deliberately loaded only normalized records. Reuse that
+        # archive without reading or synthesizing another large payload.
+        previous_hash=snapshot.content_hash
+        reusable=(not snapshot.raw_payload and isinstance(previous_hash,str) and len(previous_hash)==64
+            and all(char in '0123456789abcdefABCDEF' for char in previous_hash)
+            and (self.payloads/(previous_hash+'.json')).is_file())
+        if reusable:
+            payload=None; digest=previous_hash
+        else:
+            payload=snapshot.raw_payload or json.dumps(data,default=encode).encode()
+            digest=hashlib.sha256(payload).hexdigest()
+        data['content_hash']=digest
         serialized=json.dumps(data,default=encode)
         filename=digest+'.json'; target=self.payloads/filename
         if not target.exists():
@@ -115,6 +126,21 @@ class Repository:
         entry=self.cache_get('timed:'+key)
         if not isinstance(entry,dict) or time.time()-entry.get('cached_at',0)>=max_age_seconds: return None
         return entry['value']
+    def cache_fresh_many(self,keys,max_age_seconds):
+        """Read timed metadata with one connection and bounded SQLite bind counts."""
+        keys=list(dict.fromkeys(keys))
+        result=dict.fromkeys(keys); now=time.time()
+        if not keys: return result
+        with self.connect() as db:
+            for offset in range(0,len(keys),900):
+                chunk=keys[offset:offset+900]
+                rows=db.execute('SELECT key,data FROM cache WHERE key IN ('+','.join('?' for _ in chunk)+')',
+                    ['timed:'+key for key in chunk])
+                for key,serialized in rows:
+                    entry=json.loads(serialized)
+                    if isinstance(entry,dict) and now-entry.get('cached_at',0)<max_age_seconds:
+                        result[key[len('timed:'):]]=entry['value']
+        return result
     def cache_timed(self,key,value):
         self.cache_put('timed:'+key,{'cached_at':time.time(),'value':value})
 

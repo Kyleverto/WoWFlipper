@@ -55,7 +55,7 @@ def test_deduplicated_houses_partial_failure(tmp_path):
             return Snapshot('auctions:us:1',None,now,None,'blizzard',())
     client=Client(); service=RefreshService(repo,client,UnavailableTSM())
     result=service.run(Settings.from_dict({'buying_realms':['agamaggan','other'],'selling_realms':['third']}))
-    assert client.calls==[1,2]
+    assert sorted(client.calls)==[1,2]
     assert result['sources']['auctions:us:2']['state']=='failed'
     assert repo.latest('auctions:us:2').id==old_id
     assert repo.latest('auctions:us:2').fetched_at==now
@@ -122,7 +122,9 @@ def test_toy_ids_map_through_details_and_cache(tmp_path):
     assert state['items']==[123] and state['pending']==1
     state=client.toy_items(repo,limit=1)
     assert state['items']==[123,456] and state['pending']==0
-    assert client.toy_items(repo,limit=1)==state
+    cached=client.toy_items(repo,limit=1)
+    assert cached['items']==state['items'] and cached['pending']==0
+    assert cached['details_attempted']==0 and cached['details_fetched']==0
 
 
 def test_tsm_precedes_auctions_and_toy_classification(tmp_path):
