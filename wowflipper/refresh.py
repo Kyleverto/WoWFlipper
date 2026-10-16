@@ -1,11 +1,11 @@
 """One refresh worker with pollable status and per-house failure isolation."""
 from dataclasses import replace
-import copy, inspect, json, threading, time
+import copy, inspect, threading, time
 from itertools import islice
 from datetime import datetime, timezone
 from .engine import exclusion_reason
 from .models import is_fresh
-from .identity import pet_details, override_key
+from .identity import pet_details, override_key, simple_item_identity, discovery_item_identity
 from .realms import auction_realm
 from .sources.http import SourceError, source_diagnostic
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -221,7 +221,12 @@ class RefreshService:
                         if pet and 'battle-pet' not in settings.categories: continue
                         valuation=pet_values.get(item[1]) if pet else values.get(item[1])
                         fresh=pet_valuation_fresh if pet else valuation_fresh
-                        plausible=replace(auction,source_time=snapshot.source_time,
+                        if not pet and not discovery_item_identity(auction,settings.categories): continue
+                        # Category is not known until the item lookup. Check the
+                        # supported raw shape above, then run only the financial
+                        # prefilter here. Publication validates the original raw
+                        # identity against the category returned by item details.
+                        plausible=replace(auction,variant_key=auction.variant_key if pet else None,source_time=snapshot.source_time,
                             category='battle-pet' if pet else next((category for category in settings.categories if category != 'battle-pet'),'unknown'),
                             metadata={'simple_identity':True,'tradeability':True,**({'pet':details} if pet else {})})
                         override=resale_overrides.get(override_key(auction))
@@ -307,10 +312,9 @@ class RefreshService:
                             category='battle-pet' if verified else 'unknown'
                             if not verified: metadata['exclusion_reason']='unknown_pet_metadata'
                         else:
-                            variants=json.loads(auction.variant_key) if auction.variant_key else {}
-                            simple=isinstance(variants,dict) and all(k in {'context','bonus_lists','modifiers'} and v in (0,[],None) for k,v in variants.items())
-                            metadata={**metadata,'simple_identity':simple,'tradeability':metadata.get('tradeability')}
                             category=metadata.get('category','unknown') if auction.item_id != 82800 else 'unknown'
+                            simple=simple_item_identity(auction,category)
+                            metadata={**metadata,'simple_identity':simple,'tradeability':metadata.get('tradeability')}
                         records.append(replace(auction,metadata=metadata,category=category))
                     identity=self.repository.publish(replace(snapshot,records=tuple(records)))
                     self.status['sources'][key]={'state':'success','snapshot_id':identity,**counts[house]}

@@ -1,23 +1,14 @@
 """Pure calculations; regional sales statistics are assumptions, not proceeds guarantees."""
-import json
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext, ROUND_FLOOR
 from .models import Candidate, Auction, is_fresh, integer, decimal
-from .identity import pet_details, market_key, override_key
+from .identity import pet_details, market_key, override_key, simple_item_identity
 
 
 def _simple(auction):
     if not isinstance(auction.metadata, dict) or auction.metadata.get("simple_identity") is not True:
         return False
-    if auction.variant_key is None:
-        return True
-    try:
-        variants = json.loads(auction.variant_key)
-        return isinstance(variants, dict) and all(
-            k in {"context", "bonus_lists", "modifiers"} and v in (0, [], None)
-            for k, v in variants.items())
-    except (ValueError, TypeError):
-        return False
+    return simple_item_identity(auction)
 
 
 def _precision(settings):
