@@ -1,6 +1,6 @@
 """One refresh worker with pollable status and per-house failure isolation."""
 from dataclasses import replace
-import copy, inspect, threading, time
+import copy, inspect, json, threading, time, uuid
 from itertools import islice
 from datetime import datetime, timezone
 from .engine import exclusion_reason
@@ -24,6 +24,7 @@ class RefreshService:
         status=self.status.copy()
         status['sources']={key:copy.deepcopy(value.copy()) for key,value in status['sources'].copy().items()}
         status['phase_seconds']=status.get('phase_seconds',{}).copy()
+        status['changed_sources']=status.get('changed_sources',[])[:]
         if self._started is not None and status.get('running'):
             status['elapsed_seconds']=round(time.monotonic()-self._started,3)
             if self._phase_started is not None:
@@ -32,6 +33,7 @@ class RefreshService:
     def _begin(self):
         self._started=time.monotonic(); self._phase_started=None
         self.status={'running':True,'sources':{},'started_at':datetime.now(timezone.utc).isoformat(),
+            'run_id':str(uuid.uuid4()),'completed_at':None,'changed_sources':[],
             'elapsed_seconds':0,'completed':0,'total':0,'phase_seconds':{}}
         self._phase('valuations')
     def _phase(self,name,total=0):
@@ -45,11 +47,11 @@ class RefreshService:
         if 'progress' in parameters or any(p.kind==inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
             return method(*args,progress=progress)
         return method(*args)
-    def _discover_collection(self,method,key):
+    def _discover_collection(self,method,key,max_batches=50):
         fetched=attempted=0; previous=None
         def progress(update):
             self.status['sources'][key]={**self.status['sources'].get(key,{}),**update,'state':'running'}
-        for batch in range(50):
+        for batch in range(max_batches):
             state=self._call_progress(method,self.repository,progress=progress)
             fetched+=state.get('details_fetched',0); attempted+=state.get('details_attempted',0)
             observed=self.status['sources'].get(key,{})
@@ -61,30 +63,44 @@ class RefreshService:
         partial=bool(self.status['sources'][key].get('failed') or state.get('unavailable') or state.get('errors'))
         self.status['sources'][key].update(state='partial' if partial else 'pending' if state['pending'] else 'success')
         return state
-    def start(self,settings):
+    @staticmethod
+    def _same_source(snapshot,previous):
+        return previous is not None and all(getattr(snapshot,key)==getattr(previous,key)
+            for key in ('source_key','source_time','http_last_modified','mode','records','source_id','source_metadata'))
+    def start(self,settings,changed_only=False):
         if not self._lock.acquire(blocking=False): raise RuntimeError('Refresh already running')
         self._begin()
-        return self._worker.submit(self._run,settings)
-    def run(self,settings):
+        return self._worker.submit(self._run,settings,changed_only)
+    def run(self,settings,changed_only=False):
         if not self._lock.acquire(blocking=False): raise RuntimeError('Refresh already running')
         self._begin()
-        return self._run(settings)
-    def _run(self,settings):
+        return self._run(settings,changed_only)
+    def _run(self,settings,changed_only=False):
         try:
             self.repository.save_settings(settings)
+            valuation_changed=False; valuations={}
+            def refresh_valuation(key,method_name):
+                nonlocal valuation_changed
+                previous=self.repository.latest(key,include_payload=False)
+                valuations[key]=previous
+                snapshot=getattr(self.tsm_client,method_name)(previous)
+                changed=not self._same_source(snapshot,previous)
+                if changed_only and not changed:
+                    identity=previous.id; state='unchanged'
+                else:
+                    identity=self.repository.publish(snapshot); state='success'
+                valuations[key]=snapshot
+                if changed:
+                    valuation_changed=True; self.status['changed_sources'].append(key)
+                self.status['sources'][key]={'state':state,'snapshot_id':identity,**(snapshot.source_metadata or {})}
+                if self.repository.maintenance_warning: self.status['sources'][key]['maintenance_warning']=self.repository.maintenance_warning
             try:
-                snapshot=self.tsm_client.region(self.repository.latest('tsm:us',include_payload=False))
-                identity=self.repository.publish(snapshot)
-                self.status['sources']['tsm:us']={'state':'success','snapshot_id':identity,**(snapshot.source_metadata or {})}
-                if self.repository.maintenance_warning: self.status['sources']['tsm:us']['maintenance_warning']=self.repository.maintenance_warning
+                refresh_valuation('tsm:us','region')
             except Exception as exc:
                 self.status['sources']['tsm:us']={'state':'failed',**source_diagnostic(exc)}
             if 'battle-pet' in settings.categories:
                 try:
-                    snapshot=self.tsm_client.pets(self.repository.latest('tsm-pets:us',include_payload=False))
-                    identity=self.repository.publish(snapshot)
-                    self.status['sources']['tsm-pets:us']={'state':'success','snapshot_id':identity,**(snapshot.source_metadata or {})}
-                    if self.repository.maintenance_warning: self.status['sources']['tsm-pets:us']['maintenance_warning']=self.repository.maintenance_warning
+                    refresh_valuation('tsm-pets:us','pets')
                 except Exception as exc:
                     self.status['sources']['tsm-pets:us']={'state':'failed',**source_diagnostic(exc)}
             self._phase('realms')
@@ -126,10 +142,11 @@ class RefreshService:
                 status=self.status['sources'].setdefault(key,{'state':'skipped','error_code':code,'realms':[]})
                 status['realms'].append(slug)
             self._phase('collections',sum(category in settings.categories for category in ('toy','decor')))
-            collections={}
+            collections={}; collection_cache={}
             for category,method,key in [('toy','toy_items','toys:us'),('decor','decor_items','decor:us')]:
                 legacy=self.repository.cache_get('timed:'+key) or {}
                 cached=self.repository.cache_get(key) or legacy.get('value') or {}
+                collection_cache[category]=cached
                 state={'items':cached.get('items',[]),'pending':len(cached.get('remaining',[]))}
                 if category=='decor' and category in settings.categories:
                     # Item class 20/subclass 0 establishes decor directly. A full
@@ -137,6 +154,9 @@ class RefreshService:
                     # Retain existing catalog membership for older cached metadata.
                     self.status['sources'][key]={'state':'success','classification':'item_metadata',
                         'known_items':len(state['items'])}
+                elif changed_only and category in settings.categories:
+                    self.status['sources'][key]={'state':'unchanged','known_items':len(state['items']),
+                        'pending':state['pending'],'classification':'cached_membership'}
                 elif category in settings.categories and hasattr(self.client,method):
                     try:
                         state=self._discover_collection(getattr(self.client,method),key)
@@ -149,21 +169,30 @@ class RefreshService:
                             self.status['sources'][key]['details_fetched']=max(0,len(retained.get('resolved',{}))-len(cached.get('resolved',{})))
                 collections[category]=set(state['items'])
                 if category in settings.categories: self.status['completed']+=1
-            tsm=self.repository.latest('tsm:us',include_payload=False)
+            tsm=valuations.get('tsm:us')
             # Fetch each house once, then discover buy identities before enriching any
             # destination. Shared item metadata is independent of ask and house order.
-            values={r.item_id:r for r in tsm.records} if tsm else {}
-            pet_snapshot=self.repository.latest('tsm-pets:us',include_payload=False)
-            pet_values={r.pet_species_id:r for r in pet_snapshot.records if r.pet_species_id is not None} if pet_snapshot else {}
-            snapshots={}; counts={}
+            pet_snapshot=valuations.get('tsm-pets:us')
+            snapshots={}; counts={}; unchanged={}; previous_snapshots={}
             buy_houses={mapping[slug] for slug in settings.buying_realms if slug in mapping}
             houses=sorted(set(mapping.values()))
+            analysis_settings=settings.to_dict()
+            for preference in ('auto_refresh','sound_alerts','desktop_alerts'): analysis_settings.pop(preference,None)
+            configuration=json.dumps({'settings':analysis_settings,'mapping':mapping,'overrides':self.repository.cache_get('resale_overrides')},
+                sort_keys=True,separators=(',',':'))
+            configuration_changed=configuration!=self.repository.cache_get('refresh:configuration')
             self._phase('auction_fetch',len(houses))
             for house in houses: self.status['sources'][f'auctions:us:{house}']={'state':'queued','phase':'auction_fetch'}
             def fetch(house):
                 key=f'auctions:us:{house}'
                 self.status['sources'][key]={'state':'running','phase':'auction_fetch'}
-                return self.client.auctions(house,self.repository.latest(key,include_payload=False))
+                if changed_only and hasattr(self.client,'auction_update'):
+                    previous=self.repository.latest_provenance(key)
+                    return self.client.auction_update(house,previous.get('http_last_modified') if previous else None)
+                previous=self.repository.latest(key,include_payload=False)
+                previous_snapshots[house]=previous
+                snapshot=self.client.auctions(house,previous)
+                return None if changed_only and self._same_source(snapshot,previous) else snapshot
             with ThreadPoolExecutor(max_workers=3) as pool:
                 queued=iter(houses); stop_error=None
                 futures={pool.submit(fetch,house):house for house in islice(queued,3)}
@@ -172,9 +201,13 @@ class RefreshService:
                     for future in done:
                         house=futures.pop(future); key=f'auctions:us:{house}'
                         try:
-                            snapshots[house]=future.result()
-                            counts[house]={'metadata_fetched':0,'metadata_skipped':0,'metadata_failed':0,'pet_metadata_failed':0,'pet_metadata_unknown':0}
-                            self.status['sources'][key]={'state':'running','phase':'metadata'}
+                            snapshot=future.result()
+                            if snapshot is None:
+                                unchanged[house]=True
+                                self.status['sources'][key]={'state':'unchanged'}
+                            else:
+                                snapshots[house]=snapshot
+                                self.status['sources'][key]={'state':'running','phase':'metadata'}
                         except Exception as exc:
                             self.status['sources'][key]={'state':'failed',**source_diagnostic(exc)}
                             if isinstance(exc,SourceError) and exc.code in {'auth_missing','auth_denied','rate_limited'}:
@@ -187,6 +220,36 @@ class RefreshService:
                         self.status['sources'][f'auctions:us:{house}']={'state':'skipped','phase':'auction_fetch',
                             'deferred':True,**source_diagnostic(stop_error)}
                         self.status['completed']+=1
+            if changed_only:
+                if not snapshots and not valuation_changed and not configuration_changed:
+                    return self.status
+                if 'toy' in settings.categories and hasattr(self.client,'toy_items'):
+                    # Changed automatic checks advance a single bounded catalog
+                    # batch. The all-304 path above does no classification work.
+                    self._phase('collections',1)
+                    self.status['sources']['toys:us']={'state':'running'}
+                    try:
+                        state=self._discover_collection(self.client.toy_items,'toys:us',max_batches=1)
+                    except Exception as exc:
+                        retained=self.repository.cache_get('toys:us') or self.repository.cache_fresh('toys:us',7*86400) or collection_cache['toy']
+                        state={'items':retained.get('items',[]),'pending':len(retained.get('remaining',[]))}
+                        self.status['sources']['toys:us']={**self.status['sources'].get('toys:us',{}),'state':'failed',
+                            **source_diagnostic(exc),'using_cached_items':bool(state['items']),
+                            'known_items':len(state['items']),'pending':state['pending']}
+                    collections['toy']=set(state['items'])
+                    self.status['completed']=1
+                # A changed buy identity can alter destination classification and
+                # competition. Load retained selected houses only when work exists.
+                for house in unchanged:
+                    previous=previous_snapshots.get(house) or self.repository.latest(f'auctions:us:{house}',include_payload=False)
+                    previous_snapshots[house]=previous
+                    if previous is not None: snapshots[house]=previous
+                for house in snapshots:
+                    if house not in previous_snapshots:
+                        previous_snapshots[house]=self.repository.latest(f'auctions:us:{house}',include_payload=False)
+            counts={house:{'metadata_fetched':0,'metadata_skipped':0,'metadata_failed':0,'pet_metadata_failed':0,'pet_metadata_unknown':0} for house in snapshots}
+            values={r.item_id:r for r in tsm.records} if tsm else {}
+            pet_values={r.pet_species_id:r for r in pet_snapshot.records if r.pet_species_id is not None} if pet_snapshot else {}
             self._phase('metadata',len(buy_houses & snapshots.keys()))
             metadata_by_item={}
             def metadata_identity(auction):
@@ -316,16 +379,25 @@ class RefreshService:
                             simple=simple_item_identity(auction,category)
                             metadata={**metadata,'simple_identity':simple,'tradeability':metadata.get('tradeability')}
                         records.append(replace(auction,metadata=metadata,category=category))
-                    identity=self.repository.publish(replace(snapshot,records=tuple(records)))
-                    self.status['sources'][key]={'state':'success','snapshot_id':identity,**counts[house]}
+                    normalized=replace(snapshot,records=tuple(records))
+                    previous=previous_snapshots.get(house)
+                    if changed_only and self._same_source(normalized,previous):
+                        identity=previous.id; state='unchanged'
+                    else:
+                        identity=self.repository.publish(normalized); state='success'
+                        self.status['changed_sources'].append(key)
+                    self.status['sources'][key]={'state':state,'snapshot_id':identity,**counts[house]}
                     if self.repository.maintenance_warning: self.status['sources'][key]['maintenance_warning']=self.repository.maintenance_warning
                 except Exception as exc:
                     # Never expose upstream response bodies, headers or credentials.
                     self.status['sources'][key]={'state':'failed',**source_diagnostic(exc)}
                 self.status['completed']+=1
+            if all(self.status['sources'][f'auctions:us:{house}']['state'] in {'success','unchanged'} for house in houses):
+                self.repository.cache_put('refresh:configuration',configuration)
             return self.status
         finally:
             completed=self.status.get('completed',0); total=self.status.get('total',0)
             self._phase('complete',total)
-            self.status.update(completed=completed,running=False,elapsed_seconds=round(time.monotonic()-self._started,3))
+            self.status.update(completed=completed,running=False,elapsed_seconds=round(time.monotonic()-self._started,3),
+                completed_at=datetime.now(timezone.utc).isoformat())
             self._lock.release()

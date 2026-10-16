@@ -314,6 +314,10 @@ class BackupService:
             db.executemany('INSERT INTO portfolio_events(id,data) VALUES(?,?)',[(value['id'],serialize({key:item for key,item in value.items() if key!='id'})) for value in portfolio['events']])
             db.executemany('INSERT INTO portfolio_meta VALUES(?,?)',[(key,serialize(value)) for key,value in portfolio['meta'].items()])
             db.executemany('INSERT INTO portfolio_requests VALUES(?,?,?)',[(value['request_id'],serialize(value['payload']),serialize(value['result'])) for value in portfolio['requests']])
+            # Notification cursors belong to the current dataset, not the portable ledger.
+            for table in ('opportunity_seen','opportunity_feed'):
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
+                    db.execute('DELETE FROM '+table)
             db.execute('INSERT OR REPLACE INTO cache VALUES(?,?)',('data_epoch',serialize(uuid4().hex)))
         with self.repository._analysis_lock: self.repository._analysis_cache=None
         return {'recovery_backup':recovery,'summary':summary}

@@ -29,6 +29,7 @@ class MarketQuery:
                 finished=datetime.now(timezone.utc)
                 if finished<self.now or finished>valid_until:
                     continue
+                self.revision=revision
                 repo._analysis_cache=(revision,self.now,valid_until,self.__dict__.copy())
                 self.now=finished
                 return
@@ -97,6 +98,10 @@ class MarketQuery:
     def _ordered(self,args):
         query=args.get('q','').casefold().strip()
         candidates=[c for c in rank(self.candidates.values()) if query in c.valuation.name.casefold() or query in str(c.auction.item_id)]
+        if 'new_after' in args:
+            from .opportunity_updates import keys_since
+            keys=keys_since(self.repo,args['new_after'])
+            candidates=[candidate for candidate in candidates if candidate.key in keys]
         if 'categories' in args:
             selected=set(args['categories'].split(',')) if args['categories'] else set()
             if not selected <= {'recipe','mount','toy','decor','battle-pet'}:

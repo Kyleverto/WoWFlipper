@@ -103,6 +103,156 @@ function initializeBackupControls() {
   };
   syncBackupControls();
 }
+let monitorAcceptedQuery = null, monitorViewCursor = null, monitorCurrentCursor = null, newOnlyAfter = null;
+let monitorRevision = 0, monitorConfigRevision = 0;
+let monitorPolling = false, monitorConfiguring = false, monitorPreferences = {enabled:false,sound:false,desktop:false};
+let monitorAudio = null, monitorMemoryNotified = 0, monitorUpdate = null;
+function monitorAlertStatus(text) {$("monitor-alert-status").textContent = text;}
+function monitorStoredCursor() {
+  try {return Math.max(monitorMemoryNotified, Number(globalThis.localStorage?.getItem("notified-opportunities:" + knownDataEpoch)) || 0);}
+  catch (_) {return monitorMemoryNotified;}
+}
+function monitorSaveCursor(cursor, shared = false) {
+  monitorMemoryNotified = Math.max(monitorMemoryNotified, cursor);
+  try {if (shared) globalThis.localStorage?.setItem("notified-opportunities:" + knownDataEpoch, String(monitorMemoryNotified));} catch (_) { /* This tab still remembers claimed alerts. */ }
+}
+async function monitorUnlockSound() {
+  const Audio = globalThis.AudioContext || globalThis.webkitAudioContext;
+  if (!Audio) throw Error("Sound is unavailable in this browser.");
+  if (!monitorAudio) monitorAudio = new Audio();
+  if (monitorAudio.state === "suspended") await monitorAudio.resume();
+}
+function monitorPlaySound() {
+  if (!monitorAudio || monitorAudio.state === "suspended") {
+    monitorAlertStatus("Use Test alert to enable sound in this browser tab."); return;
+  }
+  const tone = monitorAudio.createOscillator(), volume = monitorAudio.createGain(), now = monitorAudio.currentTime;
+  tone.frequency.setValueAtTime(660, now); volume.gain.setValueAtTime(0.06, now);
+  volume.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+  tone.connect(volume); volume.connect(monitorAudio.destination); tone.start(now); tone.stop(now + 0.25);
+}
+async function monitorDesktopPermission() {
+  if (!globalThis.Notification) throw Error("Desktop notifications are unavailable in this browser.");
+  let permission = Notification.permission;
+  if (permission === "default") permission = await Notification.requestPermission();
+  if (permission !== "granted") throw Error("Desktop notification permission was denied. Enable it in browser settings to use desktop alerts.");
+}
+function monitorNotify(update) {
+  const cursor = Number(update.cursor) || 0;
+  // Re-read shared storage immediately before claiming: another tab may have alerted.
+  const previous = monitorStoredCursor();
+  if (cursor <= previous) return;
+  const canSound = monitorPreferences.sound && monitorAudio && monitorAudio.state !== "suspended" && monitorAudio.state !== "closed";
+  const canDesktop = monitorPreferences.desktop && globalThis.Notification?.permission === "granted";
+  // Every tab advances its own quiet cursor. Only a tab able to alert claims
+  // the shared cursor, so a silent or nonmatching view cannot suppress another.
+  monitorSaveCursor(cursor, !update.baseline && !!update.notify_count && !!(canSound || canDesktop));
+  if (update.baseline || !update.notify_count) return;
+  try {if (monitorPreferences.sound) monitorPlaySound();} catch (_) {monitorAlertStatus("Sound could not play. Use Test alert to enable it again.");}
+  if (monitorPreferences.desktop) {
+    if (globalThis.Notification?.permission === "granted") {
+      try {new Notification(`${update.notify_count} new WoW Flipper opportunit${update.notify_count === 1 ? "y" : "ies"}`, {
+        body:(update.preview || []).slice(0,3).map(item => item.name).join(", "),
+        tag:"wowflipper-" + knownDataEpoch + "-" + cursor,
+      });} catch (_) {monitorAlertStatus("Desktop alerts could not be shown. Check browser notification settings.");}
+    } else monitorAlertStatus("Desktop alerts need permission. Enable Desktop alerts or use Test alert.");
+  }
+}
+function renderMonitorControls(status) {
+  monitorPreferences = {enabled:!!status.enabled,sound:!!status.sound,desktop:!!status.desktop};
+  if (!monitorConfiguring) for (const key of ["enabled","sound","desktop"]) $("monitor-" + key).checked = monitorPreferences[key];
+  $("monitor-enabled").disabled = monitorConfiguring || state?.mode === "offline-demo";
+  $("monitor-sound").disabled = monitorConfiguring;
+  $("monitor-desktop").disabled = monitorConfiguring;
+  $("monitor-status").textContent = status.enabled
+    ? `Checks every 2 minutes while this app server is running${status.next_check_at ? "; next check " + new Date(status.next_check_at).toLocaleTimeString() : ""}.`
+    : "Automatic checks are off. The app server must stay running for checks.";
+}
+function renderUpdateBanner(update) {
+  monitorUpdate = update;
+  $("updates-banner").hidden = !update.updated && !update.new_count && newOnlyAfter === null;
+  $("updates-count").textContent = update.new_count ? `${update.new_count} new matching opportunit${update.new_count === 1 ? "y" : "ies"}. Your current list is unchanged.` : !update.updated && newOnlyAfter !== null ? "Showing new opportunities from the last update." : "Market data updated. Your current list is unchanged.";
+  $("show-new").hidden = !update.new_count;
+  $("update-list").hidden = !!update.new_count;
+  $("all-opportunities").hidden = newOnlyAfter === null;
+}
+async function pollMonitor() {
+  if (!state || monitorAcceptedQuery === null || monitorPolling || epochReloading || backupRestoring || activeWrites > 0) return;
+  monitorPolling = true;
+  const accepted = monitorAcceptedQuery, revision = monitorRevision, configRevision = monitorConfigRevision;
+  try {
+    const status = await api("/api/monitor");
+    if (!acceptDataEpoch(status)) return;
+    if (configRevision === monitorConfigRevision && !monitorConfiguring) renderMonitorControls(status);
+    if (status.refresh) {
+      state.refresh = status.refresh;
+      renderSources(); syncBackupControls();
+      $("refresh").disabled = state.mode === "offline-demo" || state.refresh.running;
+      $("refresh").textContent = state.refresh.running ? "Refreshing sources…" : "Refresh sources";
+    }
+    const query = new URLSearchParams(accepted), feed = new URLSearchParams({q:query.get("q") || "",categories:query.get("categories") || "",notify_after:monitorStoredCursor()});
+    if (monitorViewCursor !== null) feed.set("after", monitorViewCursor);
+    const update = await api("/api/updates?" + feed.toString());
+    if (!acceptDataEpoch(update) || accepted !== monitorAcceptedQuery || revision !== monitorRevision || update.deferred) return;
+    monitorCurrentCursor = update.cursor;
+    if (update.baseline || monitorViewCursor === null) {
+      monitorViewCursor = update.cursor; monitorSaveCursor(update.cursor);
+      renderUpdateBanner({...update,updated:false,new_count:0});
+    } else {monitorNotify(update); renderUpdateBanner(update);}
+  } catch (error) {$("monitor-status").textContent = "Automatic check status unavailable. " + error.message;}
+  finally {monitorPolling = false;}
+}
+async function reviewMarketUpdates(onlyNew, all = false) {
+  if (monitorAcceptedQuery === null) return;
+  const previous = newOnlyAfter, cutoff = monitorViewCursor, cursor = monitorCurrentCursor;
+  const query = new URLSearchParams(monitorAcceptedQuery);
+  query.set("page", "1");
+  newOnlyAfter = onlyNew ? cutoff : all ? null : previous;
+  if (newOnlyAfter !== null) query.set("new_after", newOnlyAfter); else query.delete("new_after");
+  for (const id of ["show-new","update-list","all-opportunities"]) $(id).disabled = true;
+  try {
+    await loadResults(true,query.toString());
+    if (monitorAcceptedQuery !== query.toString()) return;
+    ++monitorRevision;
+    if (cursor !== null) monitorViewCursor = cursor;
+    renderUpdateBanner({updated:false,new_count:0});
+    // Keep a way back to the full list even after the updates banner is dismissed.
+    $("updates-banner").hidden = newOnlyAfter === null;
+    if (newOnlyAfter !== null) $("updates-count").textContent = "Showing new opportunities from the last update.";
+  } catch (error) {newOnlyAfter = previous; message(error.message,true);}
+  finally {for (const id of ["show-new","update-list","all-opportunities"]) $(id).disabled = false;}
+}
+function startMonitorPolling() {
+  if (monitorAcceptedQuery === null) return;
+  setInterval(() => pollMonitor(),5000);
+  document.addEventListener("visibilitychange", () => {if (!document.hidden) pollMonitor();});
+}
+function initializeMonitorControls() {
+  for (const key of ["enabled","sound","desktop"]) $("monitor-" + key).onchange = async () => {
+    if (monitorConfiguring) return;
+    monitorConfiguring = true; ++monitorConfigRevision;
+    let value = $("monitor-" + key).checked;
+    try {
+      if (key === "sound" && value) await monitorUnlockSound();
+      if (key === "desktop" && value) await monitorDesktopPermission();
+    } catch (error) {value = false; monitorAlertStatus(error.message);}
+    try {const status = await api("/api/monitor", {[key]:value}); monitorConfiguring = false; renderMonitorControls(status);}
+    catch (error) {monitorConfiguring = false; renderMonitorControls(monitorPreferences); monitorAlertStatus(error.message);}
+  };
+  $("test-alert").onclick = async () => {
+    try {
+      await monitorUnlockSound(); monitorPlaySound();
+      if ($("monitor-desktop").checked) {await monitorDesktopPermission(); new Notification("WoW Flipper test alert",{body:"New matching opportunities will appear here."});}
+      monitorAlertStatus("Test alert sent. Sound is ready in this tab.");
+    } catch (error) {monitorAlertStatus(error.message);}
+  };
+  $("show-new").onclick = () => reviewMarketUpdates(true);
+  $("update-list").onclick = () => reviewMarketUpdates(false);
+  $("all-opportunities").onclick = () => reviewMarketUpdates(false,true);
+  $("updates-banner").hidden = true;
+  renderMonitorControls(monitorPreferences);
+}
+
 const moneyFields = {
   capital: "Initial capital",
   reserve: "Cash reserve",
@@ -277,7 +427,7 @@ function initializeOpportunityCategories() {
   }
 }
 function params() {
-  return new URLSearchParams({
+  const query = new URLSearchParams({
     q: $("search").value,
     categories: visibleCategories.join(","),
     sort: $("sort").value,
@@ -285,6 +435,8 @@ function params() {
     page: resultsPage,
     page_size: 100,
   });
+  if (newOnlyAfter !== null) query.set("new_after",newOnlyAfter);
+  return query;
 }
 function table(headers) {
   const wrap = el("div", undefined, "table-wrap"),
@@ -429,7 +581,7 @@ function renderSources() {
   };
   const refresh = state.refresh, entries = Object.entries(refresh.sources || {});
   const houses = entries.filter(([key]) => key.startsWith("auctions:us:"));
-  const finalized = houses.filter(([,value]) => ["success", "failed", "skipped"].includes(value.state)).length;
+  const finalized = houses.filter(([,value]) => ["success", "unchanged", "failed", "skipped"].includes(value.state)).length;
   const seconds = Math.max(0, Math.floor(Number(refresh.elapsed_seconds) || 0));
   const elapsed = seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
   const phases = {valuations:"Regional valuations", realms:"Realm discovery", classification:"Classification", collections:"Toy and decor classification", auctions:"Auction houses", auction_fetch:"Downloading auction houses", metadata:"Item and pet details", publication:"Saving auction snapshots", complete:"Refresh complete", failed:"Refresh stopped"};
@@ -440,7 +592,7 @@ function renderSources() {
     ? `${phases[refresh.phase] || "Refreshing sources"} • ${elapsed} elapsed${houses.length ? ` • ${finalized} of ${houses.length} houses finalized` : ""}${refresh.running && refresh.total ? ` • ${refresh.completed || 0} of ${refresh.total} phase steps` : ""}`
     : "Source evidence and refresh progress";
   const completed = el("details");
-  const completeCount = houses.filter(([,value]) => value.state === "success" && !value.metadata_error_code && !value.metadata_deferred && !value.metadata_failed).length;
+  const completeCount = houses.filter(([,value]) => ["success","unchanged"].includes(value.state) && !value.metadata_error_code && !value.metadata_deferred && !value.metadata_failed).length;
   if (completeCount) {
     completed.append(el("summary", `${completeCount} completed auction house${completeCount === 1 ? "" : "s"}`));
     target.append(completed);
@@ -467,7 +619,7 @@ function renderSources() {
     if (status.metadata_error_code) counts.push(`Item classification incomplete: ${messages[status.metadata_error_code] || messages.source_error}`);
     if (status.using_cached_items) counts.push("Retained known classifications; new membership remains unverified.");
     const paragraph = el("p", `${sourceLabel(source)}: ${status.state}${detail ? ` — ${detail}${httpStatus}` : ""}${counts.length ? ` • ${counts.join(" • ")}` : ""}`, failed || status.failed || status.metadata_error_code || status.metadata_deferred || status.metadata_failed ? "source-failure" : "source-progress");
-    (source.startsWith("auctions:us:") && status.state === "success" && !status.metadata_error_code && !status.metadata_deferred && !status.metadata_failed ? completed : target).append(paragraph);
+    (source.startsWith("auctions:us:") && ["success","unchanged"].includes(status.state) && !status.metadata_error_code && !status.metadata_deferred && !status.metadata_failed ? completed : target).append(paragraph);
   }
 }
 function populateDestinations() {
@@ -501,9 +653,9 @@ function retireResults() {
   ++resultsSequence;
   invalidateResults();
 }
-function loadResults(force = false) {
+function loadResults(force = false, accepted = null) {
   if (resaleMutationPending) return Promise.resolve();
-  const query = params().toString();
+  const query = accepted === null ? params().toString() : accepted;
   if (!force && resultsRequest?.query === query) return resultsRequest.promise;
   resultsRequest?.controller.abort();
   const sequence = ++resultsSequence;
@@ -534,6 +686,9 @@ async function performResults(query, sequence, signal) {
   rows = result.rows;
   resultsPage = result.page;
   const acceptedQuery = new URLSearchParams(query);
+  const previousView = monitorAcceptedQuery === null ? null : new URLSearchParams(monitorAcceptedQuery);
+  if (previousView && (previousView.get("q") !== acceptedQuery.get("q") || previousView.get("categories") !== acceptedQuery.get("categories"))) {monitorViewCursor = null; ++monitorRevision;}
+  monitorAcceptedQuery = query;
   acceptedQuery.set("page", result.page);
   acceptedQuery.set("page_size", result.page_size);
   $("export").href = "/api/export?" + acceptedQuery.toString();
@@ -1716,6 +1871,7 @@ $("correction-fields").onchange = () => {
     outcomeFields();
     await loadResults();
     await loadShopping();
+    pollMonitor(); startMonitorPolling();
     if (pending.size) {
       message(
         [...pending.keys()].some(key => key.startsWith("inventory:"))
@@ -1744,6 +1900,7 @@ $("correction-fields").onchange = () => {
   }
 })();
 initializeBackupControls();
+initializeMonitorControls();
 let refreshPollRunning = false;
 setInterval(async () => {
   if (!state?.refresh.running || refreshPollRunning) return;
@@ -1755,13 +1912,8 @@ setInterval(async () => {
     $("refresh").disabled = state.mode === "offline-demo" || state.refresh.running;
     $("refresh").textContent = state.refresh.running ? "Refreshing sources…" : "Refresh sources";
     if (!state.refresh.running) {
-      await loadState();
-      retireResults();
-      message(
-        "Refresh completed. Inspect source errors and source ages before selecting.",
-      );
-      await loadResults(true);
-      if (currentTab === "shopping") await loadShopping();
+      message("Refresh completed. Updated opportunities are available for review.");
+      await pollMonitor();
     }
   } catch (error) {
     message(error.message, true);

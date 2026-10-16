@@ -26,6 +26,16 @@ If script activation is disabled, use `.\.venv\Scripts\python.exe` and `.\.venv\
 
 The default data directory is `~/.local/share/wowflipper` on every OS; override with `--data-dir PATH`. Demo mode uses its `offline-demo` subdirectory and synthetic data with visible offline labels. Live mode refuses a demo database. Offline imports remain labelled as imported evidence; use a separate data directory if you want to keep imports apart from live data. Runtime databases, caches, outcomes and credentials belong outside Git.
 
+## Automatic checks and deal alerts
+
+Enable **Auto-refresh every 2 minutes** above the tabs to check in the background while the app server is running. The first check starts immediately; subsequent checks run two minutes after the previous refresh finishes. Manual and automatic refreshes share one worker. Authentication, rate-limit and upstream failures delay retries, up to 15 minutes. Closing the browser does not stop checks; quitting the server or sleeping the computer does.
+
+Automatic checks use conditional auction requests and reuse unchanged evidence. Changed prices or settings still trigger reassessment. These are Blizzard snapshot updates, not live auction events, so an auction can sell before it appears here. Source timestamps and freshness rules still apply.
+
+New matching opportunities produce a banner without replacing rows, moving your scroll position or clearing drafts. **Show new** opens the new listings; **All opportunities** returns to the full list. **Update list** reloads the current view. New-only filtering also applies to CSV export. Alerts follow your accepted search and category filters. Initial startup, saved research settings and restored backups establish a quiet baseline; previously seen listings do not repeatedly alert.
+
+**Sound alerts** and **Desktop alerts** are optional and off by default. Enable them explicitly and use **Test alert** to check browser support. Desktop alerts need browser permission; sound needs a user gesture. Keep a browser tab open for alerts. Auto-refresh and alert preferences are included in portable backups; transient notification tracking is not. See [automatic-refresh validation](docs/auto-refresh-validation.md) for test coverage and limits.
+
 ## Credentials and live refresh
 
 Create a Blizzard developer client at [the official developer portal](https://develop.battle.net/). Keep the client secret local. `.env.example` lists the two required variables, but **the application does not load `.env` automatically**. Set them in the same shell that starts the server:
@@ -50,7 +60,7 @@ Opportunity analysis is reused across page, search and sort requests. New snapsh
 
 ## Refresh progress
 
-Refresh downloads up to three connected auction houses concurrently and resolves realm, toy and item details with up to four concurrent requests. Cached item metadata is read in batches. The evidence panel shows the current phase, elapsed time, finalized houses and lookup counts, with pending work separated from unavailable details and errors. Completed house reports are collapsed. Polling updates only progress while a refresh runs, preserving shopping and inventory drafts; completion reloads current market results. Reloading the browser does not stop the server's refresh worker. Keep the server running.
+Refresh downloads up to three connected auction houses concurrently and resolves realm, toy and item details with up to four concurrent requests. Cached item metadata is read in batches. The evidence panel shows the current phase, elapsed time, finalized houses and lookup counts, with pending work separated from unavailable details and errors. Completed house reports are collapsed. Polling updates only progress while a refresh runs, preserving shopping and inventory drafts; completion leaves current market results in place until you choose to update them. Reloading the browser does not stop the server's refresh worker. Keep the server running.
 
 The first refresh can still take longer while realm, toy and relevant item metadata caches are filled. The per-house lookup bound remains in place; a later refresh can resolve additional plausible items. Source failures retain the previous successful snapshot, subject to its normal freshness limit. Phase timings are exposed by `/api/refresh/status` to help identify remaining download, metadata or publication costs. Source maintenance and rate limits can still delay or prevent fresh evidence.
 

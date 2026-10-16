@@ -100,9 +100,22 @@ class Repository:
         """Read small invalidation tokens in one consistent SQLite transaction."""
         with self.connect() as db:
             db.execute('BEGIN')
-            settings=tuple(db.execute("SELECT key,data FROM cache WHERE key IN ('settings','realms','resale_overrides') ORDER BY key"))
+            settings=[]
+            for key,serialized in db.execute("SELECT key,data FROM cache WHERE key IN ('settings','realms','resale_overrides') ORDER BY key"):
+                if key=='settings':
+                    value=json.loads(serialized)
+                    for preference in ('auto_refresh','sound_alerts','desktop_alerts'): value.pop(preference,None)
+                    serialized=json.dumps(value,sort_keys=True,separators=(',',':'))
+                settings.append((key,serialized))
+            settings=tuple(settings)
             snapshots=tuple(db.execute('SELECT source,MAX(id) FROM snapshots GROUP BY source ORDER BY source'))
         return settings,snapshots
+
+    def latest_provenance(self,source_key):
+        """Read conditional request evidence without decoding normalized records."""
+        with self.connect() as db:
+            row=db.execute('SELECT s.id,p.data FROM snapshots s JOIN provenance p ON p.id=s.id WHERE s.source=? ORDER BY s.id DESC LIMIT 1',(source_key,)).fetchone()
+        return {'snapshot_id':row[0],**json.loads(row[1])} if row else None
 
     def latest_metadata(self):
         """Return source status without decoding auction records or raw payloads."""

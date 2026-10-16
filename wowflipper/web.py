@@ -14,6 +14,8 @@ from .models import integer
 from .refresh import RefreshService
 from .sources.blizzard import BlizzardClient
 from .demo import import_snapshot
+from .monitor import MarketMonitor
+from .opportunity_updates import OpportunityUpdates
 
 def create_app(data_dir: Path, testing: bool=False) -> Flask:
     app=Flask(__name__)
@@ -22,6 +24,10 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
     app.extensions['repository']=repo; app.extensions['refresh']=refresh
     mutation_lock=threading.RLock()
     app.extensions['mutation_lock']=mutation_lock
+    monitor=MarketMonitor(repo,refresh,mutation_lock)
+    updates=OpportunityUpdates(repo,refresh_running=lambda:bool(refresh_snapshot().get('running')))
+    app.extensions['monitor']=monitor
+    app.extensions['updates']=updates
     if not repo.cache_get('data_epoch'): repo.cache_put('data_epoch',secrets.token_hex(16))
     def backups():
         from .backup import BackupService
@@ -42,7 +48,7 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
             canonical=parsed.hostname+(f':{port}' if port is not None else '')
             if canonical!=request.host: return jsonify(error='Invalid local host'),403
         except ValueError: return jsonify(error='Invalid local host'),403
-        if request.method not in ('GET','HEAD','OPTIONS') or request.path in ('/api/state','/api/backup'):
+        if request.method not in ('GET','HEAD','OPTIONS') or request.path in ('/api/state','/api/backup','/api/updates'):
             # Restore and all writes share a gate. Check the dataset token after
             # acquiring it: another request's cookie may have decoded before restore.
             mutation_lock.acquire()
@@ -76,6 +82,18 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
     def refresh_snapshot():
         snapshot=getattr(refresh,'status_snapshot',None)
         return snapshot() if callable(snapshot) else copy.deepcopy(refresh.status)
+    def monitor_snapshot(current_refresh=None):
+        return {**monitor.status_snapshot(),'refresh':refresh_snapshot() if current_refresh is None else current_refresh,'data_epoch':repo.cache_get('data_epoch')}
+    @app.get('/api/monitor')
+    def monitor_state(): return jsonify(safe(monitor_snapshot()))
+    @app.post('/api/monitor')
+    def configure_monitor():
+        monitor.configure(**body(['enabled','sound','desktop']))
+        return jsonify(safe(monitor_snapshot()))
+    @app.get('/api/updates')
+    def opportunity_updates():
+        args={key:request.args[key] for key in ('after','notify_after','q','categories') if key in request.args}
+        return jsonify(safe(updates.summary(args,running=bool(refresh_snapshot().get('running')))))
     @app.get('/')
     def index(): return render_template('index.html')
     @app.get('/api/state')
@@ -86,7 +104,8 @@ def create_app(data_dir: Path, testing: bool=False) -> Flask:
             session['data_epoch']=epoch
         session.setdefault('csrf',secrets.token_urlsafe(32))
         sources=repo.latest_metadata()
-        return jsonify(safe({'csrf':session['csrf'],'data_epoch':epoch,'settings':repo.load_settings().to_dict(),'resale_overrides':list(repo.load_resale_overrides().values()),'realms':repo.cache_get('realms') or [],'mode':repo.cache_get('mode') or 'live','sources':sources,'refresh':refresh_snapshot(),'credentials_configured':bool(os.environ.get('BLIZZARD_CLIENT_ID') and os.environ.get('BLIZZARD_CLIENT_SECRET')),'summary':portfolio().summary(),'history':portfolio().history()}))
+        current_refresh=refresh_snapshot()
+        return jsonify(safe({'csrf':session['csrf'],'data_epoch':epoch,'settings':repo.load_settings().to_dict(),'resale_overrides':list(repo.load_resale_overrides().values()),'realms':repo.cache_get('realms') or [],'mode':repo.cache_get('mode') or 'live','sources':sources,'refresh':current_refresh,'monitor':monitor_snapshot(current_refresh),'credentials_configured':bool(os.environ.get('BLIZZARD_CLIENT_ID') and os.environ.get('BLIZZARD_CLIENT_SECRET')),'summary':portfolio().summary(),'history':portfolio().history()}))
     @app.get('/api/backup')
     def download_backup():
         document=backups().export()

@@ -114,6 +114,19 @@ class BlizzardClient:
         if response.status==304:
             if previous is None: raise ValueError('304 without prior snapshot')
             return replace(previous,fetched_at=now)
+        return self._auction_snapshot(house_id,response)
+
+    def auction_update(self,house_id,previous_header=None):
+        """Return only changed auction data; a 304 requires no previous records."""
+        response=self._get(f'/data/wow/connected-realm/{int(house_id)}/auctions',
+            headers={'If-Modified-Since':previous_header} if previous_header else None)
+        if response.status==304:
+            if not previous_header: raise ValueError('304 without prior auction header')
+            return None
+        return self._auction_snapshot(house_id,response)
+
+    def _auction_snapshot(self,house_id,response):
+        now=datetime.now(timezone.utc)
         data=self._json(response)
         if not isinstance(data.get('auctions'),list): raise ValueError('Invalid auctions schema')
         modified=next((v for k,v in response.headers.items() if k.lower()=='last-modified'),None)

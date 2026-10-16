@@ -27,6 +27,9 @@ class Settings:
     buying_realms: tuple = ('agamaggan',)
     selling_realms: tuple = ()
     categories: tuple = ('recipe', 'mount', 'toy', 'decor', 'battle-pet')
+    auto_refresh: bool = False
+    sound_alerts: bool = False
+    desktop_alerts: bool = False
 
     @classmethod
     def from_dict(cls, data: dict):
@@ -38,6 +41,8 @@ class Settings:
             value = data.get(field.name, getattr(default, field.name))
             if isinstance(getattr(default, field.name), Decimal):
                 value = decimal(value, 1 if field.name in {'discount','auction_cut','min_sale_rate'} else None)
+            elif isinstance(getattr(default, field.name), bool):
+                if type(value) is not bool: raise ValueError('Expected boolean preference')
             elif isinstance(getattr(default, field.name), int):
                 value = integer(value, 1 if field.name in {'capital','max_copies','max_tsm_age_hours','max_auction_age_hours'} else 0)
             elif field.name in {'buying_realms','selling_realms','categories'}:

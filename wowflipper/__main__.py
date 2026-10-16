@@ -16,6 +16,12 @@ def main():
     elif (path/'market.sqlite3').exists():
         from .repository import Repository
         if Repository(path).cache_get('mode')=='offline-demo': parser.error('Demo storage cannot be used as live storage; choose another data directory')
-    create_app(path).run(host='127.0.0.1',port=args.port,debug=False,use_reloader=False)
+    app=create_app(path)
+    monitor=app.extensions['monitor']
+    monitor.start()
+    try:
+        app.run(host='127.0.0.1',port=args.port,debug=False,use_reloader=False)
+    finally:
+        monitor.stop()
 
 if __name__=='__main__': main()
