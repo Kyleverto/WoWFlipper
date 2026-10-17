@@ -1,7 +1,7 @@
 """Transactional normalized snapshots and atomically published raw payloads."""
 import sqlite3, json, hashlib, os, tempfile, threading, time
 from pathlib import Path
-from dataclasses import asdict, replace
+from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from .models import Snapshot, Auction, Valuation, integer, timestamp, decimal
@@ -10,6 +10,8 @@ from .identity import parse_pet_identity
 
 def encode(value):
     if isinstance(value,(datetime,Decimal)): return str(value)
+    if is_dataclass(value) and not isinstance(value,type):
+        return {field.name:getattr(value,field.name) for field in fields(value)}
     raise TypeError('Unsupported persisted value')
 
 class Repository:
@@ -43,35 +45,49 @@ class Repository:
                     integer(record.pet_species_id,1)
                     if record.item_id != 82800: raise ValueError('Pet valuation requires Pet Cage item ID')
         if snapshot.records and any(type(r)!=type(snapshot.records[0]) for r in snapshot.records): raise ValueError('Mixed records')
-        data=asdict(snapshot); data.pop('raw_payload'); data.pop('id')
+        # Keep the existing record and metadata objects until the JSON encoder
+        # visits each record. asdict() duplicates every nested metadata graph.
+        data={field.name:getattr(snapshot,field.name) for field in fields(snapshot)
+            if field.name not in {'raw_payload','id'}}
         data['record_type']='auction' if snapshot.records and isinstance(snapshot.records[0],Auction) else 'valuation'
-        # A conditional 304 carries the original raw content hash even when the
-        # refresh worker deliberately loaded only normalized records. Reuse that
-        # archive without reading or synthesizing another large payload.
         previous_hash=snapshot.content_hash
         reusable=(not snapshot.raw_payload and isinstance(previous_hash,str) and len(previous_hash)==64
             and all(char in '0123456789abcdefABCDEF' for char in previous_hash)
             and (self.payloads/(previous_hash+'.json')).is_file())
-        if reusable:
-            payload=None; digest=previous_hash
-        else:
-            payload=snapshot.raw_payload or json.dumps(data,default=encode).encode()
-            digest=hashlib.sha256(payload).hexdigest()
-        data['content_hash']=digest
-        serialized=json.dumps(data,default=encode)
-        filename=digest+'.json'; target=self.payloads/filename
-        if not target.exists():
-            fd,temp=tempfile.mkstemp(dir=self.payloads)
-            try:
-                with os.fdopen(fd,'wb') as stream: stream.write(payload); stream.flush(); os.fsync(stream.fileno())
-                os.replace(temp,target)
-            finally:
-                if os.path.exists(temp): os.unlink(temp)
-        with self.connect() as db:
-            cursor=db.execute('INSERT INTO snapshots(source,data,payload) VALUES(?,?,?)',(snapshot.source_key,serialized,filename)); identity=cursor.lastrowid
-            compact={k:v for k,v in data.items() if k!='records'}
-            db.execute('INSERT INTO provenance VALUES(?,?,?)',(identity,snapshot.source_key,json.dumps(compact,default=encode)))
-            db.execute('DELETE FROM snapshots WHERE source=? AND id NOT IN (SELECT id FROM snapshots WHERE source=? ORDER BY id DESC LIMIT 2)',(snapshot.source_key,snapshot.source_key))
+        temporary=None
+        try:
+            if reusable:
+                digest=previous_hash
+            elif snapshot.raw_payload:
+                digest=hashlib.sha256(snapshot.raw_payload).hexdigest()
+            else:
+                # Match the legacy fallback JSON byte for byte without retaining
+                # a second complete JSON string and encoded bytes in memory.
+                fd,temporary=tempfile.mkstemp(dir=self.payloads)
+                hasher=hashlib.sha256()
+                with os.fdopen(fd,'wb') as stream:
+                    for chunk in json.JSONEncoder(default=encode).iterencode(data):
+                        encoded=chunk.encode()
+                        stream.write(encoded); hasher.update(encoded)
+                    stream.flush(); os.fsync(stream.fileno())
+                digest=hasher.hexdigest()
+            data['content_hash']=digest
+            serialized=json.dumps(data,default=encode)
+            filename=digest+'.json'; target=self.payloads/filename
+            if not target.exists():
+                if reusable: raise FileNotFoundError('Referenced raw archive is no longer available')
+                if temporary is None:
+                    fd,temporary=tempfile.mkstemp(dir=self.payloads)
+                    with os.fdopen(fd,'wb') as stream:
+                        stream.write(snapshot.raw_payload); stream.flush(); os.fsync(stream.fileno())
+                os.replace(temporary,target)
+            with self.connect() as db:
+                cursor=db.execute('INSERT INTO snapshots(source,data,payload) VALUES(?,?,?)',(snapshot.source_key,serialized,filename)); identity=cursor.lastrowid
+                compact={key:value for key,value in data.items() if key!='records'}
+                db.execute('INSERT INTO provenance VALUES(?,?,?)',(identity,snapshot.source_key,json.dumps(compact,default=encode)))
+                db.execute('DELETE FROM snapshots WHERE source=? AND id NOT IN (SELECT id FROM snapshots WHERE source=? ORDER BY id DESC LIMIT 2)',(snapshot.source_key,snapshot.source_key))
+        finally:
+            if temporary is not None and os.path.exists(temporary): os.unlink(temporary)
         self.maintenance_warning=None
         try: self.cleanup()
         except (OSError,sqlite3.Error) as exc: self.maintenance_warning=type(exc).__name__
@@ -83,19 +99,26 @@ class Repository:
     def latest(self,source_key, *, include_payload=True):
         with self.connect() as db: row=db.execute('SELECT id,data,payload FROM snapshots WHERE source=? ORDER BY id DESC LIMIT 1',(source_key,)).fetchone()
         if row is None: return None
-        identity,serialized,payload=row; data=json.loads(serialized); record_type=data.pop('record_type')
+        identity,serialized,payload=row
+        del row
+        data=json.loads(serialized)
+        del serialized
+        record_type=data.pop('record_type')
         for key in ('source_time','fetched_at'):
             if data[key]: data[key]=datetime.fromisoformat(data[key])
-        records=[]
-        for record in data.pop('records'):
+        # Replace decoded record dictionaries in place so they can be released
+        # as domain objects are built, rather than retaining both full lists.
+        records=data.pop('records')
+        for index,record in enumerate(records):
             if record_type=='auction':
                 if record['source_time']: record['source_time']=datetime.fromisoformat(record['source_time'])
-                records.append(Auction(**record))
+                records[index]=Auction(**record)
             else:
                 record['updated_at']=datetime.fromisoformat(record['updated_at'])
                 for key in ('sale_rate','sold_per_day'): record[key]=Decimal(record[key])
-                records.append(Valuation(**record))
-        return Snapshot(**data,records=tuple(records),id=identity,raw_payload=(self.payloads/payload).read_bytes() if include_payload else b'')
+                records[index]=Valuation(**record)
+        records=tuple(records)
+        return Snapshot(**data,records=records,id=identity,raw_payload=(self.payloads/payload).read_bytes() if include_payload else b'')
     def analysis_revision(self):
         """Read small invalidation tokens in one consistent SQLite transaction."""
         with self.connect() as db:

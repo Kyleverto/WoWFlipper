@@ -3,7 +3,8 @@ from dataclasses import asdict, replace
 from datetime import datetime, timezone, timedelta
 import json
 from .repository import encode
-from .models import is_fresh
+from .query_exclusions import ExclusionStore
+from .models import Auction, is_fresh
 from .identity import pet_details, market_key, override_key
 from .engine import evaluate, exclusion_reason, rank, compare_destinations, index_destinations
 
@@ -66,34 +67,48 @@ class MarketQuery:
         self.values={v.item_id:v for v in self.tsm.records if v.pet_species_id is None} if self.tsm else {}
         self.pet_values={v.pet_species_id:v for v in self.pet_tsm.records if v.pet_species_id is not None} if self.pet_tsm else {}
         self.snapshots={}
-        self.candidates={}; self.exclusions=[]
-        selected=set(self.settings.buying_realms)|set(self.settings.selling_realms)
-        for slug in selected:
-            house=self.mapping.get(slug)
-            if house is None: continue
-            if house not in self.snapshots: self.snapshots[house]=repo.latest(f'auctions:us:{house}',include_payload=False)
+        self.candidates={}; self.exclusions=ExclusionStore()
+        buy_houses={self.mapping[s] for s in self.settings.buying_realms if s in self.mapping}
+        sell_houses={self.mapping[s] for s in self.settings.selling_realms if s in self.mapping}
+        # Analyze one buying house at a time. Keep only its small provenance
+        # header and eligible candidates; raw rejected listings can be released
+        # before the next repository read.
+        try:
+            for house in sorted(buy_houses):
+                snapshot=repo.latest(f'auctions:us:{house}',include_payload=False)
+                self.snapshots[house]=replace(snapshot,records=()) if snapshot else None
+                if not snapshot: continue
+                provenance_by_kind={}
+                fresh_by_kind={}
+                for kind,valuation_snapshot in ((False,self.tsm),(True,self.pet_tsm)):
+                    fresh_by_kind[kind]=bool(valuation_snapshot and is_fresh(valuation_snapshot.source_time,self.settings.max_tsm_age_hours,self.now))
+                    provenance_by_kind[kind]=json.dumps({'auction_snapshot':snapshot.id,'auction_hash':snapshot.content_hash,'auction_source_time':str(snapshot.source_time),'valuation_snapshot':valuation_snapshot.id if valuation_snapshot else None,'valuation_hash':valuation_snapshot.content_hash if valuation_snapshot else None,'valuation_source_time':str(valuation_snapshot.source_time) if valuation_snapshot else None,'valuation_mode':valuation_snapshot.mode if valuation_snapshot else None,'mode':snapshot.mode},sort_keys=True)
+                for auction in snapshot.records:
+                    pet=pet_details(auction)
+                    valuation_fresh=fresh_by_kind[bool(pet)]
+                    provenance=provenance_by_kind[bool(pet)]
+                    auction=replace(auction,source_time=snapshot.source_time)
+                    value=self.pet_values.get(pet['species_id']) if pet else self.values.get(auction.item_id)
+                    candidate=evaluate(auction,value,self.settings,self.now,self.resale_overrides.get(override_key(auction))) if value and valuation_fresh else None
+                    key=(auction.region,house,auction.auction_id)
+                    if candidate:
+                        self.candidates[key]=replace(candidate,auction=replace(auction,provenance=provenance))
+                    else: self.exclusions.append({'key':key,'item_id':auction.item_id,'name':value.name if value else f'Item {auction.item_id}','reason':('stale_or_unknown_valuation_source' if value and not valuation_fresh else exclusion_reason(auction,value,self.settings,self.now,self.resale_overrides.get(override_key(auction)))) if value else 'missing-valuation'})
+                del snapshot
+        finally:
+            self.exclusions.seal()
+        # Candidate identities are now complete across all buying houses. A
+        # second pass retains every destination listing of those exact identities,
+        # including expensive/unknown/untradeable asks for the existing comparison
+        # checks to decide. Overlapping buy/sell houses are deliberately re-read
+        # instead of retaining the entire selling universe during analysis.
+        relevant={override_key(candidate.auction) for candidate in self.candidates.values()}
+        for house in sorted(sell_houses):
+            snapshot=repo.latest(f'auctions:us:{house}',include_payload=False)
+            self.snapshots[house]=replace(snapshot,records=tuple(auction for auction in snapshot.records if isinstance(auction,Auction) and override_key(auction) in relevant)) if snapshot else None
+            del snapshot
         self.destination_snapshots={s:self.snapshots.get(self.mapping.get(s)) for s in self.settings.selling_realms}
         self.destination_index=index_destinations(self.destination_snapshots)
-        buy_houses={self.mapping[s] for s in self.settings.buying_realms if s in self.mapping}
-        for house in sorted(buy_houses):
-            snapshot=self.snapshots.get(house)
-            if not snapshot: continue
-            provenance_by_kind={}
-            fresh_by_kind={}
-            for kind,valuation_snapshot in ((False,self.tsm),(True,self.pet_tsm)):
-                fresh_by_kind[kind]=bool(valuation_snapshot and is_fresh(valuation_snapshot.source_time,self.settings.max_tsm_age_hours,self.now))
-                provenance_by_kind[kind]=json.dumps({'auction_snapshot':snapshot.id,'auction_hash':snapshot.content_hash,'auction_source_time':str(snapshot.source_time),'valuation_snapshot':valuation_snapshot.id if valuation_snapshot else None,'valuation_hash':valuation_snapshot.content_hash if valuation_snapshot else None,'valuation_source_time':str(valuation_snapshot.source_time) if valuation_snapshot else None,'valuation_mode':valuation_snapshot.mode if valuation_snapshot else None,'mode':snapshot.mode},sort_keys=True)
-            for auction in snapshot.records:
-                pet=pet_details(auction)
-                valuation_fresh=fresh_by_kind[bool(pet)]
-                provenance=provenance_by_kind[bool(pet)]
-                auction=replace(auction,source_time=snapshot.source_time)
-                value=self.pet_values.get(pet['species_id']) if pet else self.values.get(auction.item_id)
-                candidate=evaluate(auction,value,self.settings,self.now,self.resale_overrides.get(override_key(auction))) if value and valuation_fresh else None
-                key=(auction.region,house,auction.auction_id)
-                if candidate:
-                    self.candidates[key]=replace(candidate,auction=replace(auction,provenance=provenance))
-                else: self.exclusions.append({'key':key,'item_id':auction.item_id,'name':value.name if value else f'Item {auction.item_id}','reason':('stale_or_unknown_valuation_source' if value and not valuation_fresh else exclusion_reason(auction,value,self.settings,self.now,self.resale_overrides.get(override_key(auction)))) if value else 'missing-valuation'})
     def candidate(self,key): return self.candidates.get(tuple(key))
     def _ordered(self,args):
         query=args.get('q','').casefold().strip()

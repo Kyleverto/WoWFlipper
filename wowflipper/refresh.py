@@ -1,6 +1,8 @@
 """One refresh worker with pollable status and per-house failure isolation."""
 from dataclasses import replace
-import copy, inspect, json, threading, time, uuid
+import copy, inspect, json, pickle, tempfile, threading, time, uuid
+from collections.abc import MutableMapping
+from pathlib import Path
 from itertools import islice
 from datetime import datetime, timezone
 from .engine import exclusion_reason
@@ -9,6 +11,26 @@ from .identity import pet_details, override_key, simple_item_identity, discovery
 from .realms import auction_realm
 from .sources.http import SourceError, source_diagnostic
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+
+class _SnapshotSpool(MutableMapping):
+    """Private refresh-owned scratch files; only our own snapshots are unpickled.
+
+    Download workers stage their result before completing, so futures never retain
+    a region's worth of auction records. Reads materialize one house at a time.
+    """
+    def __init__(self,directory):
+        self.directory=Path(directory)
+        self.files={}
+    def __getitem__(self,house):
+        with self.files[house].open('rb') as stream:return pickle.load(stream)
+    def __setitem__(self,house,snapshot):
+        path=self.directory/f'{house}.snapshot'
+        with path.open('wb') as stream:pickle.dump(snapshot,stream,protocol=pickle.HIGHEST_PROTOCOL)
+        self.files[house]=path
+    def __delitem__(self,house):self.files.pop(house).unlink()
+    def __iter__(self):return iter(self.files)
+    def __len__(self):return len(self.files)
+
 
 class RefreshService:
     def __init__(self,repository,client,tsm_client=None):
@@ -76,7 +98,10 @@ class RefreshService:
         self._begin()
         return self._run(settings,changed_only)
     def _run(self,settings,changed_only=False):
+        staging=None
         try:
+            staging=tempfile.TemporaryDirectory(prefix='refresh-',dir=self.repository.path)
+            snapshots=_SnapshotSpool(staging.name)
             self.repository.save_settings(settings)
             valuation_changed=False; valuations={}
             def refresh_valuation(key,method_name):
@@ -173,7 +198,7 @@ class RefreshService:
             # Fetch each house once, then discover buy identities before enriching any
             # destination. Shared item metadata is independent of ask and house order.
             pet_snapshot=valuations.get('tsm-pets:us')
-            snapshots={}; counts={}; unchanged={}; previous_snapshots={}
+            counts={}; unchanged={}
             buy_houses={mapping[slug] for slug in settings.buying_realms if slug in mapping}
             houses=sorted(set(mapping.values()))
             analysis_settings=settings.to_dict()
@@ -188,11 +213,15 @@ class RefreshService:
                 self.status['sources'][key]={'state':'running','phase':'auction_fetch'}
                 if changed_only and hasattr(self.client,'auction_update'):
                     previous=self.repository.latest_provenance(key)
-                    return self.client.auction_update(house,previous.get('http_last_modified') if previous else None)
+                    snapshot=self.client.auction_update(house,previous.get('http_last_modified') if previous else None)
+                    if snapshot is None:return False
+                    snapshots[house]=snapshot
+                    return True
                 previous=self.repository.latest(key,include_payload=False)
-                previous_snapshots[house]=previous
                 snapshot=self.client.auctions(house,previous)
-                return None if changed_only and self._same_source(snapshot,previous) else snapshot
+                if changed_only and self._same_source(snapshot,previous):return False
+                snapshots[house]=snapshot
+                return True
             with ThreadPoolExecutor(max_workers=3) as pool:
                 queued=iter(houses); stop_error=None
                 futures={pool.submit(fetch,house):house for house in islice(queued,3)}
@@ -201,12 +230,11 @@ class RefreshService:
                     for future in done:
                         house=futures.pop(future); key=f'auctions:us:{house}'
                         try:
-                            snapshot=future.result()
-                            if snapshot is None:
+                            changed=future.result()
+                            if not changed:
                                 unchanged[house]=True
                                 self.status['sources'][key]={'state':'unchanged'}
                             else:
-                                snapshots[house]=snapshot
                                 self.status['sources'][key]={'state':'running','phase':'metadata'}
                         except Exception as exc:
                             self.status['sources'][key]={'state':'failed',**source_diagnostic(exc)}
@@ -241,12 +269,8 @@ class RefreshService:
                 # A changed buy identity can alter destination classification and
                 # competition. Load retained selected houses only when work exists.
                 for house in unchanged:
-                    previous=previous_snapshots.get(house) or self.repository.latest(f'auctions:us:{house}',include_payload=False)
-                    previous_snapshots[house]=previous
+                    previous=self.repository.latest(f'auctions:us:{house}',include_payload=False)
                     if previous is not None: snapshots[house]=previous
-                for house in snapshots:
-                    if house not in previous_snapshots:
-                        previous_snapshots[house]=self.repository.latest(f'auctions:us:{house}',include_payload=False)
             counts={house:{'metadata_fetched':0,'metadata_skipped':0,'metadata_failed':0,'pet_metadata_failed':0,'pet_metadata_unknown':0} for house in snapshots}
             values={r.item_id:r for r in tsm.records} if tsm else {}
             pet_values={r.pet_species_id:r for r in pet_snapshot.records if r.pet_species_id is not None} if pet_snapshot else {}
@@ -357,7 +381,8 @@ class RefreshService:
                     if metadata.get('item_class',{}).get('id') == 20 and metadata.get('item_subclass',{}).get('id') == 0:
                         metadata_by_item[item]={**metadata,'category':'decor'}
             self._phase('publication',len(snapshots))
-            for house,snapshot in sorted(snapshots.items()):
+            for house in sorted(snapshots):
+                snapshot=snapshots[house]
                 key=f'auctions:us:{house}'
                 self.status['sources'][key]={'state':'running','phase':'publication',**counts[house]}
                 try:
@@ -380,7 +405,7 @@ class RefreshService:
                             metadata={**metadata,'simple_identity':simple,'tradeability':metadata.get('tradeability')}
                         records.append(replace(auction,metadata=metadata,category=category))
                     normalized=replace(snapshot,records=tuple(records))
-                    previous=previous_snapshots.get(house)
+                    previous=self.repository.latest(key,include_payload=False) if changed_only else None
                     if changed_only and self._same_source(normalized,previous):
                         identity=previous.id; state='unchanged'
                     else:
@@ -401,3 +426,4 @@ class RefreshService:
             self.status.update(completed=completed,running=False,elapsed_seconds=round(time.monotonic()-self._started,3),
                 completed_at=datetime.now(timezone.utc).isoformat())
             self._lock.release()
+            if staging is not None:staging.cleanup()
